@@ -1,0 +1,211 @@
+"""
+Genie Space Creator Module
+Creates enriched Genie spaces with comprehensive configurations using Databricks REST API.
+"""
+
+from databricks.sdk import WorkspaceClient
+from typing import Dict, List, Any
+import json
+import uuid
+
+class GenieSpaceCreator:
+    """Creates Genie spaces with rich semantic configurations."""
+    
+    def __init__(self, catalog: str, schema: str):
+        """
+        Initialize Genie space creator.
+        
+        Args:
+            catalog: Catalog name
+            schema: Schema name
+        """
+        self.catalog = catalog
+        self.schema = schema
+        self.full_schema = f"{catalog}.{schema}"
+        self.workspace_client = WorkspaceClient()
+    
+    def create_genie_space(
+        self, 
+        config: Dict[str, Any], 
+        metric_views: List[str],
+        business_context: str
+    ) -> Dict[str, Any]:
+        """
+        Create enriched Genie space with comprehensive configuration.
+        
+        Args:
+            config: LLM-generated configuration
+            metric_views: List of created metric view names
+            business_context: Business context for instructions
+            
+        Returns:
+            Dictionary with genie_space_id and url
+        """
+        print("✨ Creating Genie Space...")
+        
+        # Build fully qualified table identifiers
+        table_identifiers = []
+        
+        # Include base tables
+        for table in config.get('relevant_tables', []):
+            table_identifiers.append(f"{self.full_schema}.{table}")
+        
+        # Build display name
+        display_name = f"AI Generated - {self.schema.replace('_', ' ').title()}"
+        
+        # Build serialized space configuration
+        serialized_space = self._build_serialized_space(
+            config=config,
+            table_identifiers=table_identifiers,
+            business_context=business_context
+        )
+        
+        try:
+            # Create Genie space using REST API
+            payload = {
+                "title": display_name,
+                "description": f"Auto-generated Genie space for {self.full_schema}",
+                "serialized_space": json.dumps(serialized_space)
+            }
+            
+            # Use api_client to make REST call
+            response = self.workspace_client.api_client.do(
+                method="POST",
+                path="/api/2.0/genie/spaces",
+                data=payload
+            )
+            
+            space_id = response.get('space_id')
+            url = f"{self._get_workspace_url()}/genie/spaces/{space_id}"
+            
+            print(f"✅ Created Genie Space: {display_name}")
+            print(f"   Space ID: {space_id}")
+            print(f"   URL: {url}")
+            print(f"   Tables: {len(table_identifiers)}")
+            
+            return {
+                'genie_space_id': space_id,
+                'url': url,
+                'display_name': display_name,
+                'table_identifiers': table_identifiers
+            }
+        
+        except Exception as e:
+            print(f"❌ Failed to create Genie space: {str(e)}")
+            print(f"\n📋 You can manually create the Genie space with:")
+            print(f"   Tables: {', '.join(table_identifiers)}")
+            print(f"\n   Use the Genie UI to:")
+            print(f"   1. Click 'New' in Genie")
+            print(f"   2. Select these tables: {', '.join(table_identifiers)}")
+            print(f"   3. Add instructions from the generated configuration")
+            
+            # Return partial result
+            return {
+                'genie_space_id': None,
+                'url': None,
+                'display_name': display_name,
+                'table_identifiers': table_identifiers,
+                'instructions': self._build_instructions_text(config, business_context)
+            }
+    
+    def _build_serialized_space(
+        self, 
+        config: Dict[str, Any], 
+        table_identifiers: List[str],
+        business_context: str
+    ) -> Dict[str, Any]:
+        """Build the serialized space configuration object."""
+        
+        # Build sample questions
+        sample_questions = []
+        for i, question in enumerate(config.get('sample_questions', [])[:5]):
+            sample_questions.append({
+                "id": str(uuid.uuid4().hex[:12]),
+                "question": [question['question']]
+            })
+        
+        # Build table data sources with descriptions
+        tables_config = []
+        table_descriptions = config.get('table_descriptions', {})
+        column_descriptions = config.get('column_descriptions', {})
+        
+        for table_id in table_identifiers:
+            table_name = table_id.split('.')[-1]
+            table_desc = table_descriptions.get(table_name, '')
+            
+            tables_config.append({
+                "identifier": table_id,
+                "description": [table_desc] if table_desc else []
+            })
+        
+        # Build instructions
+        text_instructions = [{
+            "id": str(uuid.uuid4().hex[:12]),
+            "content": [self._build_instructions_text(config, business_context)]
+        }]
+        
+        # Build example SQL queries
+        example_sqls = []
+        for question in config.get('sample_questions', [])[:5]:
+            if question.get('sql'):
+                example_sqls.append({
+                    "id": str(uuid.uuid4().hex[:12]),
+                    "question": [question['question']],
+                    "sql": [question['sql']]
+                })
+        
+        # Build measures from metrics
+        measures = []
+        for metric in config.get('metrics', [])[:10]:
+            measure = {
+                "id": str(uuid.uuid4().hex[:12]),
+                "alias": metric['name'],
+                "sql": [metric['formula']],
+                "display_name": metric.get('display_name', metric['name'])
+            }
+            if metric.get('synonyms'):
+                measure['synonyms'] = metric['synonyms'][:5]
+            measures.append(measure)
+        
+        # Build serialized space object
+        serialized_space = {
+            "version": 1,
+            "config": {
+                "sample_questions": sample_questions
+            },
+            "data_sources": {
+                "tables": tables_config
+            },
+            "instructions": {
+                "text_instructions": text_instructions,
+                "example_question_sqls": example_sqls,
+                "sql_snippets": {
+                    "measures": measures
+                }
+            }
+        }
+        
+        return serialized_space
+    
+    def _build_instructions_text(self, config: Dict[str, Any], business_context: str) -> str:
+        """Build comprehensive instructions text."""
+        
+        instructions = f"{business_context}\n\n"
+        
+        instructions += "### Key Metrics:\n"
+        for metric in config.get('metrics', [])[:10]:
+            instructions += f"- {metric.get('display_name', metric['name'])}: {metric.get('description', '')}\n"
+        
+        instructions += "\n### Dimensions:\n"
+        for dim in config.get('dimensions', [])[:10]:
+            instructions += f"- {dim['name']}: {dim.get('description', '')}\n"
+        
+        instructions += "\n### Table Relationships:\n"
+        for join in config.get('joins', [])[:5]:
+            instructions += f"- {join['left_table']} {join.get('join_type', 'JOIN')} {join['right_table']} ON {join['condition']}\n"
+        
+        return instructions
+    
+    def _get_workspace_url(self) -> str:
+        """Get workspace URL from SDK client."""
+        return self.workspace_client.config.host

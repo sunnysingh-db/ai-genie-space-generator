@@ -1,0 +1,66 @@
+# ============================================================
+# AI-Powered Genie Space Generator — Configuration
+# ============================================================
+# Fill in the answers below. Each field is a question.
+# Keep answers to 1 sentence where possible.
+# ============================================================
+
+# ── Data Location ──────────────────────────────────────────
+# Which Unity Catalog and schema contain your tables?
+catalog: sunny_uc
+schema: demo
+
+# ── Genie Space ────────────────────────────────────────────
+# What should the Genie space be called?
+genie_space_name: "Airport & Airline Passenger Analytics"
+
+
+# ── AI Model ───────────────────────────────────────────────
+# Which foundation model should generate the metrics?
+# Options: databricks-claude-opus-4-6, databricks-meta-llama-3-1-405b-instruct
+llm_model: databricks-claude-opus-4-6
+
+# ── Table Filtering ────────────────────────────────────────
+# Which table name patterns should be excluded from scanning?
+# Set to [] to scan all tables.
+exclude_table_patterns:
+  - "%_payload%"
+  - "%_traces%"
+  - "%_logs%"
+  - "trace_logs_%"
+  - "monitor_%"
+
+# ============================================================
+# Business Context Questionnaire
+# ============================================================
+# Answer each question in 1 sentence. The AI uses your answers
+# to select the right tables and generate relevant metrics.
+# ============================================================
+
+# Q1: What does your business do?
+business_domain: "Commercial aviation operations managing airports, airlines, flights, and passenger travel across global routes."
+
+# Q2: What data is tracked in these tables?
+data_description: "Airports, airlines, scheduled flights, passenger profiles with frequent flyer tiers, and ticket bookings with fares and cabin classes."
+
+# Q3: Who uses this data and what decisions do they make?
+stakeholders_and_decisions: "Operations monitors flight delays and occupancy, revenue management optimizes fare pricing by cabin class, and loyalty teams track frequent flyer engagement."
+
+# Q4: Any other important context? (optional)
+additional_context: "Data covers 20 global airports across 5 regions, 15 airlines in 3 alliances, with flights spanning Sep 2025 to Feb 2026."
+
+# ============================================================
+# Sample Questions
+# ============================================================
+# What questions does your team actually ask?
+# The AI uses these to decide which metrics and dimensions to create.
+# ============================================================
+sample_questions:
+  - "What is the average flight delay in minutes by airline?"
+  - "Which routes have the highest occupancy rates?"
+  - "Show total revenue from bookings by cabin class"
+  - "What percentage of flights were delayed or cancelled last month?"
+  - "Who are the top 10 passengers by total miles flown?"
+  - "What is the booking trend by channel over the last 90 days?"
+  - "Which airports handle the most departing flights?"
+  - "How does average fare compare across alliances?"
