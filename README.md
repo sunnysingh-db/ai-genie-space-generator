@@ -1,5 +1,7 @@
 # AI-Powered Genie Space Generator
 
+[This](https://gitlab.com/sunny.singh7/ai-genie-space-generator) Repo can be shared outside EMU
+
 Point this tool at any Unity Catalog schema and it will **automatically create a Genie Space** — powered by AI. No manual setup needed.
 
 ```
