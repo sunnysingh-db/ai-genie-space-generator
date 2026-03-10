@@ -7,6 +7,7 @@ from typing import Dict, List, Any
 from databricks.sdk import WorkspaceClient
 import json
 import uuid
+import re
 
 
 class GenieSpaceCreator:
@@ -76,7 +77,8 @@ class GenieSpaceCreator:
         serialized_space = self._build_serialized_space(
             config=config,
             table_identifiers=table_identifiers,
-            business_context=business_context
+            business_context=business_context,
+            metric_views=metric_views
         )
         
         try:
@@ -105,9 +107,11 @@ class GenieSpaceCreator:
             sq_count = len(serialized_space.get('config', {}).get('sample_questions', []))
             sql_count = len(serialized_space.get('instructions', {}).get('example_question_sqls', []))
             meas_count = len(serialized_space.get('instructions', {}).get('sql_snippets', {}).get('measures', []))
+            join_count = len(serialized_space.get('instructions', {}).get('join_specs', []))
             print(f"   Sample Questions: {sq_count}")
             print(f"   SQL Expressions: {sql_count}")
             print(f"   Measures: {meas_count}")
+            print(f"   Join Definitions: {join_count}")
             
             return {
                 'genie_space_id': space_id,
@@ -130,7 +134,8 @@ class GenieSpaceCreator:
         self, 
         config: Dict[str, Any], 
         table_identifiers: List[str],
-        business_context: str
+        business_context: str,
+        metric_views: List[str] = None
     ) -> Dict[str, Any]:
         """Build the serialized space configuration object."""
         
@@ -150,14 +155,21 @@ class GenieSpaceCreator:
         
         # --- Table data sources ---
         tables_config = []
+        metric_views_config = []
         table_descriptions = config.get('table_descriptions', {})
+        metric_view_names = set(metric_views or [])
+        
         for table_id in table_identifiers:
             table_name = table_id.split('.')[-1]
             table_desc = table_descriptions.get(table_name, '')
-            tables_config.append({
+            entry = {
                 "identifier": table_id,
                 "description": [table_desc] if table_desc else []
-            })
+            }
+            if table_name in metric_view_names:
+                metric_views_config.append(entry)
+            else:
+                tables_config.append(entry)
         
         # --- Instructions ---
         text_instructions = [{
@@ -179,7 +191,7 @@ class GenieSpaceCreator:
                     })
         example_sqls = sorted(example_sqls, key=lambda x: x['id'])
         
-        # --- Measures from LLM-generated measures (FIX: was 'metrics', now 'measures') ---
+        # --- Measures from LLM-generated measures ---
         measures = []
         for metric in config.get('measures', []):
             measure = {
@@ -193,22 +205,122 @@ class GenieSpaceCreator:
             measures.append(measure)
         measures = sorted(measures, key=lambda x: x['id'])
         
-        return {
-            "version": 1,
+        # --- Join Specs from LLM-generated joins ---
+        join_specs = self._build_join_specs(config.get('joins', []))
+        
+        # --- Build data_sources ---
+        data_sources = {"tables": tables_config}
+        if metric_views_config:
+            data_sources["metric_views"] = metric_views_config
+        
+        result = {
+            "version": 2,
             "config": {
                 "sample_questions": sample_questions
             },
-            "data_sources": {
-                "tables": tables_config
-            },
+            "data_sources": data_sources,
             "instructions": {
                 "text_instructions": text_instructions,
                 "example_question_sqls": example_sqls,
+                "join_specs": join_specs,
                 "sql_snippets": {
                     "measures": measures
                 }
             }
         }
+        
+        return result
+    
+    def _build_join_specs(self, joins: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Convert LLM-generated join definitions to Genie Space API join_specs format.
+        
+        LLM format:
+            {"left_table": "t1", "right_table": "t2", "join_type": "INNER|LEFT|RIGHT",
+             "condition": "t1.col = t2.col", "relationship_type": "MANY_TO_ONE|ONE_TO_MANY|ONE_TO_ONE"}
+        
+        API format:
+            {"id": "hex", "left": {"identifier": "cat.sch.t1", "alias": "t1"},
+             "right": {"identifier": "cat.sch.t2", "alias": "t2"},
+             "sql": ["`t1`.`col` = `t2`.`col`", "--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--"]}
+        """
+        join_specs = []
+        
+        for join in joins:
+            left_table = join.get('left_table', '')
+            right_table = join.get('right_table', '')
+            condition = join.get('condition', '')
+            
+            if not left_table or not right_table or not condition:
+                continue
+            
+            # Build fully qualified identifiers
+            left_fq = f"{self.full_schema}.{left_table}" if '.' not in left_table else left_table
+            right_fq = f"{self.full_schema}.{right_table}" if '.' not in right_table else right_table
+            
+            # Extract alias (last part of the table name)
+            left_alias = left_table.split('.')[-1]
+            right_alias = right_table.split('.')[-1]
+            
+            # Backtick-quote the condition using table aliases
+            # The condition from LLM is like "table1.col = table2.col"
+            # We need to convert to "`table1`.`col` = `table2`.`col`"
+            quoted_condition = self._backtick_quote_condition(condition)
+            
+            # Map relationship type
+            # LLM may provide relationship_type directly, or we infer from join_type
+            relationship_type = join.get('relationship_type', '').upper()
+            if not relationship_type or relationship_type not in ('MANY_TO_ONE', 'ONE_TO_MANY', 'ONE_TO_ONE'):
+                # Infer from join_type: LEFT JOIN usually means many-to-one from left perspective
+                join_type = join.get('join_type', 'INNER').upper()
+                if join_type in ('LEFT', 'LEFT OUTER'):
+                    relationship_type = 'MANY_TO_ONE'
+                elif join_type in ('RIGHT', 'RIGHT OUTER'):
+                    relationship_type = 'ONE_TO_MANY'
+                else:
+                    relationship_type = 'MANY_TO_ONE'  # Default
+            
+            join_spec = {
+                "id": uuid.uuid4().hex,
+                "left": {
+                    "identifier": left_fq,
+                    "alias": left_alias
+                },
+                "right": {
+                    "identifier": right_fq,
+                    "alias": right_alias
+                },
+                "sql": [
+                    quoted_condition,
+                    f"--rt=FROM_RELATIONSHIP_TYPE_{relationship_type}--"
+                ]
+            }
+            join_specs.append(join_spec)
+        
+        # Sort by id — required by Genie Space API
+        join_specs = sorted(join_specs, key=lambda x: x['id'])
+        
+        if join_specs:
+            print(f"   Built {len(join_specs)} join specifications for Genie Space")
+        
+        return join_specs
+    
+    def _backtick_quote_condition(self, condition: str) -> str:
+        """
+        Convert a join condition to use backtick-quoted identifiers.
+        
+        Input:  "table1.column1 = table2.column2"
+        Output: "`table1`.`column1` = `table2`.`column2`"
+        """
+        # Match patterns like table.column or schema.table.column
+        # Replace each identifier segment with backtick-quoted version
+        def quote_identifier(match):
+            parts = match.group(0).split('.')
+            return '.'.join(f'`{p.strip("`")}`' for p in parts)
+        
+        # Match word.word patterns (identifiers with dots)
+        result = re.sub(r'\b([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)+)\b', quote_identifier, condition)
+        return result
     
     def _build_instructions_text(self, config: Dict[str, Any], business_context: str) -> str:
         """Use LLM-generated business instructions, with fallback."""

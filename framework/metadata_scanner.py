@@ -33,6 +33,11 @@ class MetadataScanner:
         self.schema = schema
         self.full_schema = f"{catalog}.{schema}"
         self.exclude_patterns = exclude_table_patterns if exclude_table_patterns else []
+        
+        # Pre-compute backtick-quoted identifiers for SQL contexts
+        self.quoted_catalog = self._quote_identifier(catalog)
+        self.quoted_schema = self._quote_identifier(schema)
+        self.quoted_full_schema = f"{self.quoted_catalog}.{self.quoted_schema}"
     
     def _quote_identifier(self, identifier: str) -> str:
         """
@@ -106,7 +111,7 @@ class MetadataScanner:
                 table_name,
                 table_type,
                 comment
-            FROM {self.catalog}.information_schema.tables
+            FROM {self.quoted_catalog}.information_schema.tables
             WHERE {where_clause}
             ORDER BY table_name
         """
@@ -144,7 +149,7 @@ class MetadataScanner:
                 is_nullable,
                 column_default,
                 comment
-            FROM {self.catalog}.information_schema.columns
+            FROM {self.quoted_catalog}.information_schema.columns
             WHERE table_schema = '{self.schema}'
             ORDER BY table_name, ordinal_position
         """
@@ -182,7 +187,7 @@ class MetadataScanner:
             table_name = table['table_name']
             # Quote table name if it contains invalid characters (hyphens, etc.)
             quoted_table_name = self._quote_identifier(table_name)
-            full_name = f"{self.full_schema}.{quoted_table_name}"
+            full_name = f"{self.quoted_full_schema}.{quoted_table_name}"
             
             try:
                 df = self.spark.table(full_name).limit(limit)

@@ -2,6 +2,11 @@
 # AI-Powered Genie Space Generator — Configuration
 # ============================================================
 # Fill in the answers below. Each field is a question.
+
+# Paste below text on Databricks Assistant to automatically update this file. Once updated, kindly review and update as per business requirement.
+
+# 'For given catalog and schema, analyse all the tables and generate insights to update the config file. Do not update the keys. Only update the config values such that it is relevant to the data and business analysis. Do not change the LLM model.'
+
 # Keep answers to 1 sentence where possible.
 # ============================================================
 
@@ -12,7 +17,7 @@ schema: demo
 
 # ── Genie Space ────────────────────────────────────────────
 # What should the Genie space be called?
-genie_space_name: "Airport & Airline Passenger Analytics"
+genie_space_name: "Global Aviation Operations & Revenue Analytics"
 
 
 # ── AI Model ───────────────────────────────────────────────
@@ -29,6 +34,29 @@ exclude_table_patterns:
   - "%_logs%"
   - "trace_logs_%"
   - "monitor_%"
+  - "metrics_%"
+  - "dashboard_%"
+  - "agent_%"
+  - "vs_%"
+  - "dummy_%"
+  - "food_%"
+  - "langchain_%"
+  - "test_%"
+  - "_quality_monitoring_summary"
+  - "abac_data"
+  - "car_features"
+  - "contract_metadata"
+  - "delivery_drivers"
+  - "df_fs"
+  - "features"
+  - "orders"
+  - "payments"
+  - "procurement"
+  - "restaurants"
+  - "reviews"
+  - "source"
+  - "users"
+  - "streaming_%"
 
 # ============================================================
 # Business Context Questionnaire
@@ -38,16 +66,16 @@ exclude_table_patterns:
 # ============================================================
 
 # Q1: What does your business do?
-business_domain: "Commercial aviation operations managing airports, airlines, flights, and passenger travel across global routes."
+business_domain: "Global aviation analytics covering 20 airports across 6 regions (North America, Europe, Asia, Middle East, Oceania, South America) with 15 airlines operating 380 routes in 14 countries."
 
 # Q2: What data is tracked in these tables?
-data_description: "Airports, airlines, scheduled flights, passenger profiles with frequent flyer tiers, and ticket bookings with fares and cabin classes."
+data_description: "Airport facilities (codes, gates, regions), airline profiles (alliances, fleet sizes), scheduled flights (departure/arrival times, delays, occupancy rates, aircraft types), 800 passenger profiles (frequent flyer tiers, miles flown, demographics), and 5,000 ticket bookings (4 cabin classes, 5 booking channels, fares, taxes, ancillaries like bags/meals/wifi)."
 
 # Q3: Who uses this data and what decisions do they make?
-stakeholders_and_decisions: "Operations monitors flight delays and occupancy, revenue management optimizes fare pricing by cabin class, and loyalty teams track frequent flyer engagement."
+stakeholders_and_decisions: "Operations teams monitor flight delays (avg 15 min) and cancellation rates (10%) to improve on-time performance; revenue management analyzes $12.7M in booking revenue across Economy, Premium Economy, Business, and First cabins to optimize fare pricing; and loyalty teams track Platinum/Gold/Silver/Bronze frequent flyer tiers to drive engagement and retention."
 
 # Q4: Any other important context? (optional)
-additional_context: "Data covers 20 global airports across 5 regions, 15 airlines in 3 alliances, with flights spanning Sep 2025 to Feb 2026."
+additional_context: "Flights span Sep 2025 to Feb 2026 with 2,500 records; bookings span Jul 2025 to Feb 2026; airlines belong to Star Alliance (7), Oneworld (3), SkyTeam (3), or are unaffiliated (2); average occupancy is 76.3%; booking channels include Website, Mobile App, Airport Kiosk, Travel Agent, and Call Center; payment methods include Credit Card, Debit Card, PayPal, Wire Transfer, and Miles Redemption."
 
 # ============================================================
 # Sample Questions
@@ -56,11 +84,13 @@ additional_context: "Data covers 20 global airports across 5 regions, 15 airline
 # The AI uses these to decide which metrics and dimensions to create.
 # ============================================================
 sample_questions:
-  - "What is the average flight delay in minutes by airline?"
-  - "Which routes have the highest occupancy rates?"
-  - "Show total revenue from bookings by cabin class"
-  - "What percentage of flights were delayed or cancelled last month?"
-  - "Who are the top 10 passengers by total miles flown?"
-  - "What is the booking trend by channel over the last 90 days?"
-  - "Which airports handle the most departing flights?"
-  - "How does average fare compare across alliances?"
+  - "What is the average flight delay in minutes by airline and how does it vary by month?"
+  - "Which routes have the highest occupancy rates and what are their average fares?"
+  - "Show total booking revenue by cabin class, split by First, Business, Premium Economy, and Economy."
+  - "What percentage of flights were Delayed, Cancelled, or Completed each month from Sep 2025 to Feb 2026?"
+  - "Who are the top 10 passengers by total miles flown and what are their frequent flyer tiers?"
+  - "What is the booking volume trend by channel (Website, Mobile App, Travel Agent, Airport Kiosk, Call Center) over time?"
+  - "Which airports handle the most departing flights and what is their average delay?"
+  - "How does average fare compare across Star Alliance, Oneworld, SkyTeam, and unaffiliated airlines?"
+  - "What is the No-Show and Cancellation rate by booking channel and cabin class?"
+  - "What is the ancillary attach rate for checked bags, meals, and wifi by cabin class?"

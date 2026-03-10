@@ -13,6 +13,7 @@ from langchain_databricks import ChatDatabricks
 from typing import Dict, Any, List
 import json
 import re
+import time
 
 class LLMOrchestrator:
     """Orchestrates multi-step LLM-powered generation of metric views and Genie configurations."""
@@ -52,6 +53,11 @@ class LLMOrchestrator:
     def generate_metrics_config(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """
         Generate comprehensive metrics configuration using multi-step LLM pipeline.
+        Optimized with maximum parallelism across 3 phases.
+        
+        Phase 1: Filter tables (sequential - all other steps depend on this)
+        Phase 2: Dimensions + Measures + Joins (all 3 in parallel)
+        Phase 3: Sample questions + Business instructions (both in parallel)
         
         Args:
             metadata: Scanned metadata including tables, columns, relationships, samples
@@ -67,55 +73,99 @@ class LLMOrchestrator:
                 - sample_questions: Sample questions with SQL
                 - business_instructions: LLM-generated analyst-focused documentation
         """
-        print(f"🤖 Starting multi-step LLM pipeline with {self.llm_model}...")
+        print(f"\U0001f916 Starting multi-step LLM pipeline with {self.llm_model}...")
         print()
+        step_timings = {}
         
         try:
-            # Step 1: Filter relevant tables
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            
+            # ================================================================
+            # Phase 1: Filter relevant tables (sequential)
+            # ================================================================
             print("Step 1/6: Filtering relevant tables...")
+            t0 = time.time()
             relevant_tables = self.filter_relevant_tables(metadata)
-            print(f"✅ Selected {len(relevant_tables)} relevant tables\n")
+            step_timings['filter_tables'] = time.time() - t0
+            print(f"\u2705 Selected {len(relevant_tables)} relevant tables ({step_timings['filter_tables']:.1f}s)\n")
             
             # Filter metadata to only relevant tables
             filtered_metadata = self._filter_metadata(metadata, relevant_tables)
             
-            # Steps 2 & 4: Parallelize independent LLM calls
-            print("Steps 2 & 4: Generating dimensions and joins in parallel...")
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            
+            # ================================================================
+            # Phase 2: Dimensions + Measures + Joins (all 3 in parallel)
+            # ================================================================
+            print("Steps 2, 3 & 4: Generating dimensions, measures (3 parallel sub-workers), and joins in parallel...")
+            t_phase2 = time.time()
             dimensions = None
+            measures = None
             semantics = None
             
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                # Submit both independent tasks
+            with ThreadPoolExecutor(max_workers=3) as executor:
                 future_dimensions = executor.submit(self.generate_dimensions, filtered_metadata)
+                future_measures = executor.submit(self.generate_measures, filtered_metadata)  # internally spawns 3 parallel sub-workers
                 future_semantics = executor.submit(self.generate_joins_and_semantics, filtered_metadata)
                 
-                # Collect results as they complete
-                for future in as_completed([future_dimensions, future_semantics]):
-                    if future == future_dimensions:
+                futures_map = {
+                    future_dimensions: 'dimensions',
+                    future_measures: 'measures',
+                    future_semantics: 'joins'
+                }
+                
+                for future in as_completed(futures_map.keys()):
+                    step_name = futures_map[future]
+                    elapsed = time.time() - t_phase2
+                    if step_name == 'dimensions':
                         dimensions = future.result()
-                        print(f"  ✅ Generated {len(dimensions)} dimensions")
-                    elif future == future_semantics:
+                        step_timings['dimensions'] = elapsed
+                        print(f"  \u2705 Generated {len(dimensions)} dimensions ({elapsed:.1f}s)")
+                    elif step_name == 'measures':
+                        measures = future.result()
+                        step_timings['measures'] = elapsed
+                        print(f"  \u2705 Generated {len(measures)} measures ({elapsed:.1f}s)")
+                    elif step_name == 'joins':
                         semantics = future.result()
-                        print(f"  ✅ Generated {len(semantics.get('joins', []))} joins")
+                        step_timings['joins'] = elapsed
+                        print(f"  \u2705 Generated {len(semantics.get('joins', []))} joins ({elapsed:.1f}s)")
             
-            print()
+            phase2_time = time.time() - t_phase2
+            print(f"  \u23f1\ufe0f  Phase 2 total (wall clock): {phase2_time:.1f}s\n")
             
-            # Step 3: Generate measures (depends on dimensions)
-            print("Step 3/6: Generating measures (target: 20+)...")
-            measures = self.generate_measures(filtered_metadata, dimensions)
-            print(f"✅ Generated {len(measures)} measures\n")
+            # ================================================================
+            # Phase 3: Sample questions + Business instructions (parallel)
+            # ================================================================
+            print("Steps 5 & 6: Generating questions and instructions in parallel...")
+            t_phase3 = time.time()
+            questions = None
+            business_instructions = None
             
-            # Step 5: Generate sample questions
-            print("Step 5/6: Generating sample questions...")
-            questions = self.generate_sample_questions(dimensions, measures, semantics['joins'])
-            print(f"✅ Generated {len(questions)} sample questions\n")
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                future_questions = executor.submit(
+                    self.generate_sample_questions, dimensions, measures, semantics['joins']
+                )
+                future_instructions = executor.submit(
+                    self.generate_business_instructions, dimensions, measures
+                )
+                
+                futures_map = {
+                    future_questions: 'questions',
+                    future_instructions: 'instructions'
+                }
+                
+                for future in as_completed(futures_map.keys()):
+                    step_name = futures_map[future]
+                    elapsed = time.time() - t_phase3
+                    if step_name == 'questions':
+                        questions = future.result()
+                        step_timings['questions'] = elapsed
+                        print(f"  \u2705 Generated {len(questions)} sample questions ({elapsed:.1f}s)")
+                    elif step_name == 'instructions':
+                        business_instructions = future.result()
+                        step_timings['instructions'] = elapsed
+                        print(f"  \u2705 Generated business instructions ({len(business_instructions)} chars, {elapsed:.1f}s)")
             
-            # Step 6: Generate business instructions
-            print("Step 6/6: Generating business analyst instructions...")
-            business_instructions = self.generate_business_instructions(dimensions, measures)
-            print(f"✅ Generated business instructions ({len(business_instructions)} chars)\n")
+            phase3_time = time.time() - t_phase3
+            print(f"  \u23f1\ufe0f  Phase 3 total (wall clock): {phase3_time:.1f}s\n")
             
             # All questions (config + additional) now come from LLM with SQL
             # Deduplicate by question text
@@ -139,20 +189,24 @@ class LLMOrchestrator:
             }
             
             print("="*80)
-            print("📊 Multi-Step LLM Pipeline Complete")
+            print("\U0001f4ca Multi-Step LLM Pipeline Complete")
             print("="*80)
-            print(f"  • Relevant Tables: {len(relevant_tables)}")
-            print(f"  • Dimensions: {len(dimensions)}")
-            print(f"  • Measures: {len(measures)}")
-            print(f"  • Joins: {len(semantics['joins'])}")
-            print(f"  • Sample Questions: {len(merged_questions)} ({len(self.sample_questions)} from config + {len(questions)} LLM-generated)")
-            print(f"  • Business Instructions: Generated")
+            print(f"  \u2022 Relevant Tables: {len(relevant_tables)}")
+            print(f"  \u2022 Dimensions: {len(dimensions)}")
+            print(f"  \u2022 Measures: {len(measures)}")
+            print(f"  \u2022 Joins: {len(semantics['joins'])}")
+            print(f"  \u2022 Sample Questions: {len(merged_questions)} ({len(self.sample_questions)} from config + {len(questions)} LLM-generated)")
+            print(f"  \u2022 Business Instructions: Generated")
+            print()
+            print("  \u23f1\ufe0f  Step Timings:")
+            for step, t in step_timings.items():
+                print(f"     {step}: {t:.1f}s")
             print("="*80)
             
             return result
         
         except Exception as e:
-            print(f"❌ LLM pipeline failed: {str(e)}")
+            print(f"\u274c LLM pipeline failed: {str(e)}")
             import traceback
             traceback.print_exc()
             raise
@@ -266,91 +320,202 @@ Example start: [{{"name": "order_date", "column": "order_date", "table": "orders
         
         # Validate minimum 15 dimensions
         if len(dimensions) < 15:
-            print(f"⚠️  Warning: Only {len(dimensions)} dimensions generated, target was 15+")
+            print(f"\u26a0\ufe0f  Warning: Only {len(dimensions)} dimensions generated, target was 15+")
         
         return dimensions
     
-    def generate_measures(self, metadata: Dict[str, Any], dimensions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def generate_measures(self, metadata: Dict[str, Any], dimensions: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
-        Step 3: Generate MINIMUM 20 measures including simple, ratios, percentages, and derived metrics.
+        Step 3: Generate 30 measures using 3 parallel LLM calls (10 each).
         
-        Args:
-            metadata: Filtered metadata for relevant tables
-            dimensions: Generated dimensions
-            
-        Returns:
-            List of measure definitions with formulas and synonyms
+        Splits measure generation into 3 focused workers running concurrently:
+          - Worker A: Simple Aggregates + Statistical (5 measures)
+          - Worker B: Ratios + Percentages (10 measures)
+          - Worker C: Derived / Business KPIs (15 measures)
+        
+        Results are merged and deduplicated by measure name.
         """
-        # Get numeric columns for measures
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        # Prepare shared context
         numeric_cols = []
         for col in metadata['columns']:
             data_type = col['data_type'].lower()
             if any(x in data_type for x in ['int', 'long', 'double', 'float', 'decimal']):
                 numeric_cols.append(f"{col['table_name']}.{col['column_name']}")
-        
         numeric_cols_str = ", ".join(numeric_cols[:30])
-        dimensions_str = ", ".join([d['name'] for d in dimensions[:10]])
         
-        prompt = f"""You are a data analyst creating comprehensive measures/metrics for analytics.
+        if dimensions:
+            dimensions_str = ", ".join([d['name'] for d in dimensions[:10]])
+        else:
+            dim_cols = []
+            for col in metadata['columns']:
+                data_type = col['data_type'].lower()
+                if any(x in data_type for x in ['timestamp', 'date', 'time', 'string', 'varchar']):
+                    dim_cols.append(f"{col['table_name']}.{col['column_name']}")
+            dimensions_str = ", ".join(dim_cols[:10])
+        
+        shared_context = {
+            "numeric_cols_str": numeric_cols_str,
+            "dimensions_str": dimensions_str
+        }
+        
+        import time as _time
+        t0 = _time.time()
+        all_measures = []
+        
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            future_a = executor.submit(self._generate_measures_simple, shared_context)
+            future_b = executor.submit(self._generate_measures_ratios, shared_context)
+            future_c = executor.submit(self._generate_measures_derived, shared_context)
+            
+            workers = {
+                future_a: 'Worker A (Simple+Statistical)',
+                future_b: 'Worker B (Ratios+Percentages)',
+                future_c: 'Worker C (Derived/Business KPIs)'
+            }
+            
+            for future in as_completed(workers.keys()):
+                worker_name = workers[future]
+                elapsed = _time.time() - t0
+                try:
+                    result = future.result()
+                    all_measures.extend(result)
+                    print(f"     {worker_name}: {len(result)} measures ({elapsed:.1f}s)")
+                except Exception as e:
+                    print(f"     \u26a0\ufe0f {worker_name} failed: {str(e)[:100]} ({elapsed:.1f}s)")
+        
+        # Deduplicate by measure name (first occurrence wins)
+        seen_names = set()
+        unique_measures = []
+        for m in all_measures:
+            name = m.get('name', '').lower()
+            if name and name not in seen_names:
+                unique_measures.append(m)
+                seen_names.add(name)
+        
+        total_time = _time.time() - t0
+        print(f"     Parallel measures total: {len(unique_measures)} unique ({total_time:.1f}s wall clock)")
+        
+        if len(unique_measures) < 20:
+            print(f"\u26a0\ufe0f  Warning: Only {len(unique_measures)} measures generated, target was 20+")
+        
+        return unique_measures
+    
+    def _build_measure_prompt_header(self, shared_context: Dict[str, Any]) -> str:
+        """Build the shared header for all measure worker prompts."""
+        return f"""You are a data analyst creating measures/metrics for analytics.
 
 BUSINESS CONTEXT:
 {self.business_context}
 {self._questions_prompt}
 AVAILABLE NUMERIC COLUMNS:
-{numeric_cols_str}
+{shared_context['numeric_cols_str']}
 
 AVAILABLE DIMENSIONS:
-{dimensions_str}
-
+{shared_context['dimensions_str']}
+"""
+    
+    def _generate_measures_simple(self, shared_context: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Worker A: Generate 5 Simple Aggregate + Statistical measures."""
+        header = self._build_measure_prompt_header(shared_context)
+        
+        prompt = f"""{header}
 TASK:
-Generate MINIMUM 20 measures covering:
+Generate EXACTLY 5 measures covering Simple Aggregates and Statistical metrics ONLY:
 
-1. Simple Aggregates (8+):
-   - COUNT(*), COUNT(DISTINCT column), SUM(column), AVG(column), MIN(column), MAX(column)
-   - Example: {{"name": "total_orders", "formula": "COUNT(*)", "type": "simple", ...}}
-
-2. Ratios (4+):
-   - Division between two aggregates
-   - Example: {{"name": "revenue_per_order", "formula": "SUM(revenue) / COUNT(DISTINCT order_id)", "type": "derived", ...}}
-
-3. Percentages (3+):
-   - Proportion calculations
-   - Example: {{"name": "completion_rate", "formula": "COUNT(CASE WHEN status='completed' THEN 1 END) / COUNT(*) * 100", "type": "derived", ...}}
-
-4. Statistical Aggregates (3+):
-   - PERCENTILE_CONT, MEDIAN, STDDEV, VARIANCE
-   - Example: {{"name": "median_delivery_time", "formula": "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY delivery_time)", "type": "simple", ...}}
-
-5. Derived Metrics (2+):
-   - Complex business calculations
-   - Example: {{"name": "customer_lifetime_value", "formula": "SUM(revenue) / COUNT(DISTINCT customer_id)", "type": "derived", ...}}
+- Simple Aggregates (3): COUNT(*), COUNT(DISTINCT column), SUM(column), AVG(column), MIN(column), MAX(column)
+- Statistical (2): PERCENTILE_CONT, MEDIAN, STDDEV, VARIANCE
 
 For each measure provide:
-{{
+{{{{
   "name": "measure_name",
   "display_name": "Human Readable Name",
   "formula": "Valid SQL aggregation formula",
-  "type": "simple|derived",
+  "type": "simple",
   "description": "What this metric measures in business terms",
   "synonyms": ["synonym1", "synonym2", "synonym3"]
-}}
+}}}}
 
 CRITICAL: Your response must be ONLY a JSON array. No explanations, no markdown.
 Start with [ and end with ].
-Generate at least 20 measures.
+Generate EXACTLY 5 measures. No more, no less.
 Ensure formulas are valid SQL.
-
-Example start: [{{"name": "total_orders", "display_name": "Total Orders", "formula": "COUNT(*)", ...
+NEVER nest aggregate functions inside other aggregates (e.g. AVG(SUM(x)) is INVALID).
 """
-        
         response = self.llm.invoke(prompt)
-        measures = self._parse_json_response(response.content, expected_type=list)
+        return self._parse_json_response(response.content, expected_type=list)
+    
+    def _generate_measures_ratios(self, shared_context: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Worker B: Generate 10 Ratio + Percentage measures."""
+        header = self._build_measure_prompt_header(shared_context)
         
-        # Validate minimum 20 measures
-        if len(measures) < 20:
-            print(f"⚠️  Warning: Only {len(measures)} measures generated, target was 20+")
+        prompt = f"""{header}
+TASK:
+Generate EXACTLY 10 measures covering Ratios and Percentages ONLY:
+
+- Ratios (6): Division between two aggregates (e.g., revenue per order, average fare per passenger)
+  Example: {{{{"name": "revenue_per_booking", "formula": "SUM(total_fare) / COUNT(DISTINCT booking_id)", "type": "derived"}}}}
+
+- Percentages (4): Proportion calculations expressed as percentages
+  Example: {{{{"name": "cancellation_rate", "formula": "COUNT(CASE WHEN status='Cancelled' THEN 1 END) * 100.0 / COUNT(*)", "type": "derived"}}}}
+
+For each measure provide:
+{{{{
+  "name": "measure_name",
+  "display_name": "Human Readable Name",
+  "formula": "Valid SQL aggregation formula",
+  "type": "derived",
+  "description": "What this metric measures in business terms",
+  "synonyms": ["synonym1", "synonym2", "synonym3"]
+}}}}
+
+CRITICAL: Your response must be ONLY a JSON array. No explanations, no markdown.
+Start with [ and end with ].
+Generate EXACTLY 10 measures. No more, no less.
+Ensure formulas are valid SQL.
+NEVER nest aggregate functions inside other aggregates (e.g. AVG(SUM(x)) is INVALID). Use ratios instead.
+"""
+        response = self.llm.invoke(prompt)
+        return self._parse_json_response(response.content, expected_type=list)
+    
+    def _generate_measures_derived(self, shared_context: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Worker C: Generate 15 Derived / Business KPI measures."""
+        header = self._build_measure_prompt_header(shared_context)
         
-        return measures
+        prompt = f"""{header}
+TASK:
+Generate EXACTLY 15 measures covering Derived and Business-Specific KPIs ONLY:
+
+These are complex, multi-column business calculations such as:
+- Conditional aggregations using CASE WHEN
+- Multi-step business KPIs (e.g., customer lifetime value, load factor, yield)
+- Window-function-style calculations expressed as aggregates
+- Compound metrics combining multiple columns or tables
+
+Examples:
+- {{{{"name": "premium_cabin_share", "formula": "COUNT(CASE WHEN cabin_class IN ('Business','First') THEN 1 END) * 100.0 / COUNT(*)", "type": "derived"}}}}
+- {{{{"name": "ancillary_revenue_per_pax", "formula": "SUM(taxes_and_fees) / COUNT(DISTINCT passenger_id)", "type": "derived"}}}}
+
+For each measure provide:
+{{{{
+  "name": "measure_name",
+  "display_name": "Human Readable Name",
+  "formula": "Valid SQL aggregation formula",
+  "type": "derived",
+  "description": "What this metric measures in business terms",
+  "synonyms": ["synonym1", "synonym2", "synonym3"]
+}}}}
+
+CRITICAL: Your response must be ONLY a JSON array. No explanations, no markdown.
+Start with [ and end with ].
+Generate EXACTLY 15 measures. No more, no less.
+Ensure formulas are valid SQL.
+NEVER nest aggregate functions inside other aggregates (e.g. AVG(SUM(x)) is INVALID). Use ratios instead.
+"""
+        response = self.llm.invoke(prompt)
+        return self._parse_json_response(response.content, expected_type=list)
+
 
     def generate_joins_and_semantics(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -383,7 +548,7 @@ Example start: [{{"name": "total_orders", "display_name": "Total Orders", "formu
         
         # Format detected relationships
         relationships_info = "\n".join([
-            f"  - {r['from_table']}.{r['from_column']} → {r['to_table']}.{r['to_column']}"
+            f"  - {r['from_table']}.{r['from_column']} \u2192 {r['to_table']}.{r['to_column']}"
             for r in metadata['relationships'][:10]
         ]) or "  None detected"
         
@@ -403,7 +568,11 @@ DETECTED RELATIONSHIPS:
 
 TASK:
 Generate a JSON object with:
-1. joins: Array of join definitions
+1. joins: Array of join definitions between tables
+   - relationship_type indicates the cardinality:
+     * MANY_TO_ONE: Multiple left rows map to one right row (e.g., orders → customers)
+     * ONE_TO_MANY: One left row maps to multiple right rows (e.g., customers → orders)
+     * ONE_TO_ONE: One left row maps to at most one right row (e.g., user → user_profile)
 2. table_descriptions: Object mapping table names to business descriptions
 3. column_descriptions: Object mapping "table.column" to business descriptions
 
@@ -414,7 +583,8 @@ Format:
       "left_table": "table1",
       "right_table": "table2",
       "join_type": "INNER|LEFT|RIGHT",
-      "condition": "table1.column = table2.column"
+      "condition": "table1.column = table2.column",
+      "relationship_type": "MANY_TO_ONE|ONE_TO_MANY|ONE_TO_ONE"
     }}
   ],
   "table_descriptions": {{
@@ -526,25 +696,22 @@ AVAILABLE MEASURES (first 20):
 TASK:
 Create a CONCISE, bulleted business analyst guide. Use this structure:
 
-## 📊 Key Performance Indicators
-* List 5-7 most critical KPIs with brief definitions (1 line each)
-* Format: "**KPI Name**: Brief description and business purpose"
 
-## 🔍 Analysis Dimensions
-* List 4-6 key dimensions for slicing data (1 line each)
-* Format: "**Dimension**: Use case or filtering purpose"
+## \U0001f4a1 Quick Analysis Patterns
+* 2 common analysis scenarios (1 line each)
 
-## 💡 Quick Analysis Patterns
-* 4-5 common analysis scenarios (1 line each)
-* Format: "**Scenario**: Dimensions + Measures to use"
 
-## ⚡ Best Practices
-* 3-4 actionable tips (1 line each)
+## \u26a1 Best Practices
+* 10 actionable tips (1 line each)
 * Include date ranges, thresholds, or filters
+
+Generate insstructions such  that requires natural language explanation, such as "When users ask about customer performance without specifying a time range, ask them to clarify the time period" or "Always round percentages to two decimal places in summaries.
+
+Also, include this instruction tailored to use case :  When users ask about any KPI breakdown but don't include time range, or which KPIs in their prompt, you must ask a clarification question first to gather necessary information. For example: "Please specify the time range and sales channel you are looking for."
 
 Keep each bullet to ONE line. Focus on actionable business value. Be concise.
 
-CRITICAL: Return markdown text only. No JSON, no code blocks.
+CRITICAL: Return plain text only in structured bullets. No JSON, no code blocks, no markdown.
 """
         
         try:
@@ -559,7 +726,7 @@ CRITICAL: Return markdown text only. No JSON, no code blocks.
             return instructions
             
         except Exception as e:
-            print(f"   ⚠️  LLM generation failed ({str(e)[:100]}), using fallback template")
+            print(f"   \u26a0\ufe0f  LLM generation failed ({str(e)[:100]}), using fallback template")
             
             # Fallback: Generate simple template-based instructions
             return self._generate_fallback_instructions(dimensions, measures)
@@ -655,7 +822,7 @@ Ask questions in natural language, such as:
                 raise ValueError(f"Expected {expected_type.__name__}, got {type(result).__name__}")
             return result
         except json.JSONDecodeError as e:
-            print(f"⚠️  Initial JSON parse failed: {str(e)[:100]}")
+            print(f"\u26a0\ufe0f  Initial JSON parse failed: {str(e)[:100]}")
         
         # Attempt 2: Find and extract JSON object/array
         try:
@@ -673,8 +840,8 @@ Ask questions in natural language, such as:
                     raise ValueError(f"Expected {expected_type.__name__}, got {type(result).__name__}")
                 return result
         except Exception as e2:
-            print(f"⚠️  JSON extraction failed: {str(e2)[:100]}")
+            print(f"\u26a0\ufe0f  JSON extraction failed: {str(e2)[:100]}")
         
         # Attempt 3: Return empty structure
-        print(f"⚠️  Returning empty {expected_type.__name__} due to parse failure")
+        print(f"\u26a0\ufe0f  Returning empty {expected_type.__name__} due to parse failure")
         return expected_type()

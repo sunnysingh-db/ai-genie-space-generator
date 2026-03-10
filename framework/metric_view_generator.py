@@ -1,5 +1,4 @@
-"""
-Metric View Generator Module (Enhanced with URL Generation)
+"""Metric View Generator Module (Enhanced with URL Generation)
 Creates Unity Catalog metric views with semantic layer using WITH METRICS.
 Generates URLs to the metric views catalog page.
 """
@@ -26,6 +25,26 @@ class MetricViewGenerator:
         self.catalog = catalog
         self.schema = schema
         self.full_schema = f"{catalog}.{schema}"
+        
+        # Pre-compute backtick-quoted identifiers for SQL contexts
+        self.quoted_catalog = self._quote_identifier(catalog)
+        self.quoted_schema = self._quote_identifier(schema)
+        self.quoted_full_schema = f"{self.quoted_catalog}.{self.quoted_schema}"
+    
+    def _quote_identifier(self, identifier: str) -> str:
+        """
+        Quote identifier if it contains characters that require backticks.
+        
+        Args:
+            identifier: Table, catalog, or schema name
+            
+        Returns:
+            Backticked identifier if needed, otherwise unchanged
+        """
+        if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', identifier):
+            return identifier
+        else:
+            return f"`{identifier}`"
     
     def _get_workspace_url(self) -> str:
         """Get the Databricks workspace URL from Spark configuration."""
@@ -107,7 +126,7 @@ class MetricViewGenerator:
                 - views: List of created metric view names
                 - url: URL to metric views catalog page (or None if unavailable)
         """
-        print("📊 Creating UC metric views with semantic layer...")
+        print("\U0001f4ca Creating UC metric views with semantic layer...")
         
         created_views = []
         
@@ -128,9 +147,9 @@ class MetricViewGenerator:
                     config=config
                 )
                 created_views.append(actual_view_name)
-                print(f"  ✅ Created metric view {actual_view_name} with {len(table_metrics)} measures")
+                print(f"  \u2705 Created metric view {actual_view_name} with {len(table_metrics)} measures")
             except Exception as e:
-                print(f"  ❌ Failed to create {view_name}: {str(e)}")
+                print(f"  \u274c Failed to create {view_name}: {str(e)}")
                 import traceback
                 traceback.print_exc()
         
@@ -139,7 +158,7 @@ class MetricViewGenerator:
         metric_views_url = self.generate_metric_views_url(view_name=first_view)
         
         if metric_views_url:
-            print(f"\n  🔗 Metric Views URL: {metric_views_url}")
+            print(f"\n  \U0001f517 Metric Views URL: {metric_views_url}")
         
         return {
             'views': created_views,
@@ -235,7 +254,8 @@ class MetricViewGenerator:
             try:
                 # Drop existing view if it exists (handle both regular views and metric views)
                 try:
-                    self.spark.sql(f"DROP VIEW IF EXISTS {self.full_schema}.{current_view_name}")
+                    quoted_view = self._quote_identifier(current_view_name)
+                    self.spark.sql(f"DROP VIEW IF EXISTS {self.quoted_full_schema}.{quoted_view}")
                 except Exception as e:
                     # Ignore errors if view doesn't exist
                     pass
@@ -243,8 +263,9 @@ class MetricViewGenerator:
                 # Create metric view using WITH METRICS syntax
                 # Build delimiter using chr to avoid escaping issues
                 delimiter = chr(36) + chr(36)  # Creates $
+                quoted_view = self._quote_identifier(current_view_name)
                 create_sql = (
-                    f"CREATE OR REPLACE VIEW {self.full_schema}.{current_view_name}\n"
+                    f"CREATE OR REPLACE VIEW {self.quoted_full_schema}.{quoted_view}\n"
                     "WITH METRICS\n"
                     "LANGUAGE YAML\n"
                     f"AS {delimiter}\n"
@@ -252,7 +273,6 @@ class MetricViewGenerator:
                     f"{delimiter}"
                 )
                 
-
 
                 # Suppress noisy gRPC error logs during creation attempts
                 spark_logger = logging.getLogger("pyspark.sql.connect.logging")
@@ -267,7 +287,7 @@ class MetricViewGenerator:
                 
                 # If we get here, creation succeeded
                 if attempt > 1:
-                    print(f"  ℹ️  Created versioned metric view: {current_view_name}")
+                    print(f"  \u2139\ufe0f  Created versioned metric view: {current_view_name}")
                 
                 return current_view_name
                 
@@ -296,8 +316,63 @@ class MetricViewGenerator:
                         removed_dims = orig_dim_count - len(dimensions)
                         
                         if removed_metrics > 0 or removed_dims > 0:
-                            print(f"  ⚠️  Removed {removed_metrics} measures and {removed_dims} dimensions referencing invalid column '{bad_col_simple}', retrying...")
+                            print(f"  \u26a0\ufe0f  Removed {removed_metrics} measures and {removed_dims} dimensions referencing invalid column '{bad_col_simple}', retrying...")
                             # Rebuild YAML with filtered measures/dimensions
+                            yaml_content = self._build_metric_view_yaml(
+                                base_table=base_table,
+                                metrics=metrics,
+                                dimensions=dimensions,
+                                joins=joins,
+                                config=config
+                            )
+                            continue
+                
+                # Handle nested aggregate function errors: extract offending measure and remove it
+                if 'nested_aggregate_function' in error_msg or 'nested aggregate' in error_msg:
+                    if attempt < max_attempts:
+                        # Extract measure names from the error message (pattern: "expr AS measure_name#id")
+                        bad_measure_names = set()
+                        # Look for aggregate-inside-aggregate patterns in the error
+                        # The error plan shows: agg_func(agg_func(col)) AS measure_name#id
+                        agg_funcs_pattern = r'(?:avg|sum|count|min|max|stddev|variance|percentile_cont)'
+                        nested_pattern = rf'{agg_funcs_pattern}\s*\([^)]*{agg_funcs_pattern}\s*\([^)]*\)[^)]*\)\s+AS\s+(\w+)#'
+                        for match in re.finditer(nested_pattern, str(e).lower()):
+                            bad_measure_names.add(match.group(1))
+                        
+                        # Fallback: if we couldn't extract names from the plan, try the simpler
+                        # pattern that matches "AS measure_name#" after nested agg expressions
+                        if not bad_measure_names:
+                            # Look for any measure names following nested aggregates in the error
+                            as_pattern = r'AS\s+(\w+)#\d+'
+                            all_measures_in_error = re.findall(as_pattern, str(e))
+                            # Cross-reference with our measure list to find which ones are suspects
+                            measure_names_set = {m['name'] for m in metrics}
+                            for m_name in all_measures_in_error:
+                                if m_name in measure_names_set:
+                                    # Check if this measure's formula might have nested aggs
+                                    for m in metrics:
+                                        if m['name'] == m_name:
+                                            formula_upper = m.get('formula', '').upper()
+                                            agg_kws = ['COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'STDDEV', 'VARIANCE', 'PERCENTILE_CONT']
+                                            agg_hits = sum(1 for kw in agg_kws if kw in formula_upper)
+                                            if agg_hits >= 2:
+                                                bad_measure_names.add(m_name)
+                        
+                        # If we still couldn't identify specific measures, remove ALL measures
+                        # with multiple aggregate functions as a broad safety net
+                        if not bad_measure_names:
+                            agg_kws = ['COUNT(', 'SUM(', 'AVG(', 'MIN(', 'MAX(', 'STDDEV(', 'VARIANCE(', 'PERCENTILE_CONT(']
+                            for m in metrics:
+                                formula_upper = m.get('formula', '').upper()
+                                agg_hits = sum(1 for kw in agg_kws if kw in formula_upper)
+                                if agg_hits >= 2:
+                                    bad_measure_names.add(m['name'])
+                        
+                        if bad_measure_names:
+                            orig_count = len(metrics)
+                            metrics = [m for m in metrics if m['name'] not in bad_measure_names]
+                            removed = orig_count - len(metrics)
+                            print(f"  \u26a0\ufe0f  Removed {removed} measures with nested aggregates ({', '.join(bad_measure_names)}), retrying...")
                             yaml_content = self._build_metric_view_yaml(
                                 base_table=base_table,
                                 metrics=metrics,
@@ -322,7 +397,7 @@ class MetricViewGenerator:
                     # Generate versioned name for next attempt
                     version_num = attempt + 1
                     current_view_name = f"{view_name}_v{version_num}"
-                    print(f"  ⚠️  Metric view conflict detected, trying: {current_view_name}")
+                    print(f"  \u26a0\ufe0f  Metric view conflict detected, trying: {current_view_name}")
                     continue  # Try again with versioned name
                 else:
                     # If it's not a conflict error, or we've exhausted attempts, raise the error
@@ -331,7 +406,8 @@ class MetricViewGenerator:
     def _get_valid_columns(self, table_name: str) -> set:
         """Get the set of valid column names for a table."""
         try:
-            cols = self.spark.catalog.listColumns(f"{self.full_schema}.{table_name}")
+            quoted_table = self._quote_identifier(table_name)
+            cols = self.spark.catalog.listColumns(f"{self.quoted_full_schema}.{quoted_table}")
             return {c.name for c in cols}
         except Exception:
             return set()
@@ -357,7 +433,7 @@ class MetricViewGenerator:
                           'CURRENT', 'ROW', 'STDDEV', 'VARIANCE', 'NULLS', 'FIRST', 'LAST'}
             
             # Find bare identifiers (not prefixed with table_name.)
-            bare_refs = re.findall(r'(?<!\w\.)(?<![\w])([a-zA-Z_][a-zA-Z0-9_]*)(?=\s*[),\s=<>!+\-*/]|$)', clean_formula)
+            bare_refs = re.findall(r'(?<!\w\.)(?<![\w])([a-zA-Z_][a-zA-Z0-9_]*)(?=\s*[),\s=<>!+\-*/|$])', clean_formula)
             
             is_valid = True
             for ref in bare_refs:
@@ -371,7 +447,7 @@ class MetricViewGenerator:
                     continue
                 # Check if it looks like a value literal (e.g., 'completed', 'delayed')
                 # These are typically inside quotes in the original formula
-                if f"'{ref}'" in formula or f'"{ref}"' in formula:
+                if f"'{ref}'" in formula or f'"{ ref}"' in formula:
                     continue
             
             validated.append(metric)
@@ -388,10 +464,12 @@ class MetricViewGenerator:
         """Build YAML content for metric view semantic layer."""
         
         # Build the YAML structure
+        # Use quoted identifiers for the source reference
+        quoted_base = self._quote_identifier(base_table)
         yaml_dict = {
             'version': 1.1,
             'comment': f"AI-generated metric view for {base_table}",
-            'source': f"{self.full_schema}.{base_table}"
+            'source': f"{self.quoted_full_schema}.{quoted_base}"
         }
         
         # Build joins FIRST to determine reachable tables
@@ -452,9 +530,10 @@ class MetricViewGenerator:
                     continue
                 seen_join_names.add(right_table)
                 
+                quoted_right = self._quote_identifier(right_table)
                 yaml_join = {
                     'name': right_table,
-                    'source': f"{self.full_schema}.{right_table}",
+                    'source': f"{self.quoted_full_schema}.{quoted_right}",
                     'on': condition
                 }
                 yaml_joins.append(yaml_join)
@@ -484,9 +563,10 @@ class MetricViewGenerator:
                     continue
                 seen_join_names.add(left_table)
                 
+                quoted_left = self._quote_identifier(left_table)
                 yaml_join = {
                     'name': left_table,
-                    'source': f"{self.full_schema}.{left_table}",
+                    'source': f"{self.quoted_full_schema}.{quoted_left}",
                     'on': condition
                 }
                 yaml_joins.append(yaml_join)
@@ -553,7 +633,7 @@ class MetricViewGenerator:
             if table != base_table:
                 full_column = f"{table}.{column}"
                 # Only map dimension name if it's different from the actual column name
-                # This prevents mapping payments.status → payments.status which causes double prefixes
+                # This prevents mapping payments.status \u2192 payments.status which causes double prefixes
                 if dim_name != column:
                     dim_name_to_column[dim_name] = full_column
                     dim_name_to_column[f"{table}.{dim_name}"] = full_column
@@ -572,7 +652,7 @@ class MetricViewGenerator:
                 actual_col = dim_name_to_column[dim_ref]
                 # Only replace if it's NOT already a table.column pattern
                 # Use negative lookbehind to avoid replacing when preceded by a table name and dot
-                pattern = rf'(?<!\w\.)(?<!\.)' + re.escape(dim_ref) + r'\b'
+                pattern = rf'(?<!\w\.)(?<!\.){re.escape(dim_ref)}\b'
                 formula = re.sub(pattern, actual_col, formula)
             
             # Only remove the base table prefix (e.g., orders.column becomes column)
@@ -585,7 +665,9 @@ class MetricViewGenerator:
             
             # Validate: Skip metrics with nested aggregations (not allowed in SQL)
             # Check if there's an aggregate function inside another aggregate function
-            agg_functions = [r'\bCOUNT\b', r'\bSUM\b', r'\bAVG\b', r'\bMIN\b', r'\bMAX\b', r'\bCOLLECT_SET\b', r'\bCOLLECT_LIST\b']
+            agg_functions = [r'\bCOUNT\b', r'\bSUM\b', r'\bAVG\b', r'\bMIN\b', r'\bMAX\b',
+                            r'\bSTDDEV\b', r'\bVARIANCE\b', r'\bPERCENTILE_CONT\b', r'\bPERCENTILE_DISC\b',
+                            r'\bCOLLECT_SET\b', r'\bCOLLECT_LIST\b']
             formula_upper = formula.upper()
             
             # Count occurrences of aggregate functions
@@ -618,7 +700,7 @@ class MetricViewGenerator:
                         for inner_agg in agg_functions:
                             if re.search(inner_agg, content_inside):
                                 has_nested_agg = True
-                                print(f"  ⚠️  Skipping metric '{metric['name']}' due to nested aggregation")
+                                print(f"  \u26a0\ufe0f  Skipping metric '{metric['name']}' due to nested aggregation")
                                 break
                         if has_nested_agg:
                             break
