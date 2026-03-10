@@ -295,9 +295,9 @@ class MetricViewGenerator:
                 error_msg = str(e).lower()
                 
                 # Handle unresolved column errors: remove offending measures/dimensions and retry
-                if 'unresolved_column' in error_msg or 'cannot be resolved' in error_msg:
+                if 'unresolved_column' in error_msg or 'cannot be resolved' in error_msg or 'field_not_found' in error_msg or 'no such struct field' in error_msg:
                     # Extract the bad column name from error
-                    bad_col_match = re.search(r'with name `([^`]+)`', str(e))
+                    bad_col_match = re.search(r'(?:with name|struct field) `([^`]+)`', str(e))
                     if bad_col_match and attempt < max_attempts:
                         bad_col = bad_col_match.group(1)
                         # Handle dotted references like bookings.booking_date
@@ -490,7 +490,40 @@ class MetricViewGenerator:
             if d.get('table', base_table) in reachable_tables
         ]
         
-        # Add dimensions (filtered)
+        # ── Deduplicate dimension and measure names ────────────────────
+        # Metric views require all dimension and measure names to be unique.
+        # LLM may generate duplicates; keep only the first occurrence of each name.
+        seen_dim_names = set()
+        unique_dimensions = []
+        for d in filtered_dimensions:
+            name = d.get('name', '')
+            if name and name not in seen_dim_names:
+                seen_dim_names.add(name)
+                unique_dimensions.append(d)
+        filtered_dimensions = unique_dimensions
+
+        seen_measure_names = set()
+        unique_metrics = []
+        for m in metrics:
+            name = m.get('name', '')
+            if name and name not in seen_measure_names:
+                seen_measure_names.add(name)
+                unique_metrics.append(m)
+        metrics = unique_metrics
+
+        # Resolve cross-collisions: dimension names must not overlap with measure names.
+        # Measures take priority (they are the core metrics); rename conflicting dimensions.
+        measure_names = {m.get('name', '') for m in metrics}
+        deconflicted_dimensions = []
+        for d in filtered_dimensions:
+            if d['name'] in measure_names:
+                d = dict(d)  # shallow copy to avoid mutating the original
+                d['name'] = f"dim_{d['name']}"
+            deconflicted_dimensions.append(d)
+        filtered_dimensions = deconflicted_dimensions
+        # ── End deduplication ──────────────────────────────────────────
+        
+        # Add dimensions (filtered and deduplicated)
         if filtered_dimensions:
             yaml_dict['dimensions'] = self._build_dimensions_yaml(filtered_dimensions, base_table)
         

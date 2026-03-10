@@ -56,7 +56,7 @@ class LLMOrchestrator:
         Optimized with maximum parallelism across 3 phases.
         
         Phase 1: Filter tables (sequential - all other steps depend on this)
-        Phase 2: Dimensions + Measures + Joins (all 3 in parallel)
+        Phase 2: Dimensions + Measures + Joins (sequential to avoid rate limits)
         Phase 3: Sample questions + Business instructions (both in parallel)
         
         Args:
@@ -93,41 +93,35 @@ class LLMOrchestrator:
             filtered_metadata = self._filter_metadata(metadata, relevant_tables)
             
             # ================================================================
-            # Phase 2: Dimensions + Measures + Joins (all 3 in parallel)
+            # Phase 2: Dimensions → Measures → Joins (sequential)
+            # Runs sequentially to avoid overwhelming the foundation model
+            # endpoint with too many concurrent calls.
+            # generate_measures internally uses 3 parallel sub-workers
+            # which is the max concurrency (3 instead of 5).
             # ================================================================
-            print("Steps 2, 3 & 4: Generating dimensions, measures (3 parallel sub-workers), and joins in parallel...")
             t_phase2 = time.time()
-            dimensions = None
-            measures = None
-            semantics = None
-            
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                future_dimensions = executor.submit(self.generate_dimensions, filtered_metadata)
-                future_measures = executor.submit(self.generate_measures, filtered_metadata)  # internally spawns 3 parallel sub-workers
-                future_semantics = executor.submit(self.generate_joins_and_semantics, filtered_metadata)
-                
-                futures_map = {
-                    future_dimensions: 'dimensions',
-                    future_measures: 'measures',
-                    future_semantics: 'joins'
-                }
-                
-                for future in as_completed(futures_map.keys()):
-                    step_name = futures_map[future]
-                    elapsed = time.time() - t_phase2
-                    if step_name == 'dimensions':
-                        dimensions = future.result()
-                        step_timings['dimensions'] = elapsed
-                        print(f"  \u2705 Generated {len(dimensions)} dimensions ({elapsed:.1f}s)")
-                    elif step_name == 'measures':
-                        measures = future.result()
-                        step_timings['measures'] = elapsed
-                        print(f"  \u2705 Generated {len(measures)} measures ({elapsed:.1f}s)")
-                    elif step_name == 'joins':
-                        semantics = future.result()
-                        step_timings['joins'] = elapsed
-                        print(f"  \u2705 Generated {len(semantics.get('joins', []))} joins ({elapsed:.1f}s)")
-            
+
+            # Phase 2a: Dimensions (1 LLM call)
+            print("Step 2/6: Generating dimensions...")
+            t0 = time.time()
+            dimensions = self.generate_dimensions(filtered_metadata)
+            step_timings['dimensions'] = time.time() - t0
+            print(f"  \u2705 Generated {len(dimensions)} dimensions ({step_timings['dimensions']:.1f}s)")
+
+            # Phase 2b: Measures (3 parallel sub-workers internally — max 3 concurrent)
+            print("Step 3/6: Generating measures...")
+            t0 = time.time()
+            measures = self.generate_measures(filtered_metadata)
+            step_timings['measures'] = time.time() - t0
+            print(f"  \u2705 Generated {len(measures)} measures ({step_timings['measures']:.1f}s)")
+
+            # Phase 2c: Joins & Semantics (1 LLM call, no contention)
+            print("Step 4/6: Generating joins and semantics...")
+            t0 = time.time()
+            semantics = self.generate_joins_and_semantics(filtered_metadata)
+            step_timings['joins'] = time.time() - t0
+            print(f"  \u2705 Generated {len(semantics.get('joins', []))} joins ({step_timings['joins']:.1f}s)")
+
             phase2_time = time.time() - t_phase2
             print(f"  \u23f1\ufe0f  Phase 2 total (wall clock): {phase2_time:.1f}s\n")
             
