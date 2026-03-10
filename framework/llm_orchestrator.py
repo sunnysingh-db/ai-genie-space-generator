@@ -244,7 +244,7 @@ Start your response with [ and end with ]
     
     def generate_dimensions(self, metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
-        Step 2: Generate MINIMUM 15 dimensions covering temporal, categorical, and numeric types.
+        Step 2: Generate MINIMUM 20 dimensions covering temporal, categorical, and numeric types.
         
         Args:
             metadata: Filtered metadata for relevant tables
@@ -287,7 +287,7 @@ Numeric Columns (can be used as dimensions if categorical in nature):
   {numeric_cols}
 
 TASK:
-Generate MINIMUM 15 dimensions covering:
+Generate MINIMUM 20 dimensions covering:
 - Temporal dimensions (5+): date columns, timestamps, time periods
 - Categorical dimensions (7+): status, type, category, classification fields
 - Numeric dimensions (3+): ratings, scores, counts that are categorical in nature
@@ -304,7 +304,7 @@ For each dimension provide:
 
 CRITICAL: Your response must be ONLY a JSON array. No explanations, no markdown, no code blocks.
 Start with [ and end with ].
-Generate at least 15 dimensions.
+Generate at least 20 dimensions.
 
 Example start: [{{"name": "order_date", "column": "order_date", "table": "orders", ...
 """
@@ -411,12 +411,12 @@ AVAILABLE DIMENSIONS:
 """
     
     def _generate_measures_simple(self, shared_context: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Worker A: Generate 5 Simple Aggregate + Statistical measures."""
+        """Worker A: Generate 10 Simple Aggregate + Statistical measures."""
         header = self._build_measure_prompt_header(shared_context)
         
         prompt = f"""{header}
 TASK:
-Generate EXACTLY 5 measures covering Simple Aggregates and Statistical metrics ONLY:
+Generate EXACTLY 10 measures covering Simple Aggregates and Statistical metrics ONLY:
 
 - Simple Aggregates (3): COUNT(*), COUNT(DISTINCT column), SUM(column), AVG(column), MIN(column), MAX(column)
 - Statistical (2): PERCENTILE_CONT, MEDIAN, STDDEV, VARIANCE
@@ -433,7 +433,7 @@ For each measure provide:
 
 CRITICAL: Your response must be ONLY a JSON array. No explanations, no markdown.
 Start with [ and end with ].
-Generate EXACTLY 5 measures. No more, no less.
+Generate EXACTLY 10 measures. No more, no less.
 Ensure formulas are valid SQL.
 NEVER nest aggregate functions inside other aggregates (e.g. AVG(SUM(x)) is INVALID).
 """
@@ -441,12 +441,12 @@ NEVER nest aggregate functions inside other aggregates (e.g. AVG(SUM(x)) is INVA
         return self._parse_json_response(response.content, expected_type=list)
     
     def _generate_measures_ratios(self, shared_context: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Worker B: Generate 10 Ratio + Percentage measures."""
+        """Worker B: Generate 15 Ratio + Percentage measures."""
         header = self._build_measure_prompt_header(shared_context)
         
         prompt = f"""{header}
 TASK:
-Generate EXACTLY 10 measures covering Ratios and Percentages ONLY:
+Generate EXACTLY 15 measures covering Ratios and Percentages ONLY:
 
 - Ratios (6): Division between two aggregates (e.g., revenue per order, average fare per passenger)
   Example: {{{{"name": "revenue_per_booking", "formula": "SUM(total_fare) / COUNT(DISTINCT booking_id)", "type": "derived"}}}}
@@ -466,7 +466,7 @@ For each measure provide:
 
 CRITICAL: Your response must be ONLY a JSON array. No explanations, no markdown.
 Start with [ and end with ].
-Generate EXACTLY 10 measures. No more, no less.
+Generate EXACTLY 15 measures. No more, no less.
 Ensure formulas are valid SQL.
 NEVER nest aggregate functions inside other aggregates (e.g. AVG(SUM(x)) is INVALID). Use ratios instead.
 """
@@ -474,12 +474,12 @@ NEVER nest aggregate functions inside other aggregates (e.g. AVG(SUM(x)) is INVA
         return self._parse_json_response(response.content, expected_type=list)
     
     def _generate_measures_derived(self, shared_context: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Worker C: Generate 15 Derived / Business KPI measures."""
+        """Worker C: Generate 20 Derived / Business KPI measures."""
         header = self._build_measure_prompt_header(shared_context)
         
         prompt = f"""{header}
 TASK:
-Generate EXACTLY 15 measures covering Derived and Business-Specific KPIs ONLY:
+Generate EXACTLY 20 measures covering Derived and Business-Specific KPIs ONLY:
 
 These are complex, multi-column business calculations such as:
 - Conditional aggregations using CASE WHEN
@@ -503,7 +503,7 @@ For each measure provide:
 
 CRITICAL: Your response must be ONLY a JSON array. No explanations, no markdown.
 Start with [ and end with ].
-Generate EXACTLY 15 measures. No more, no less.
+Generate EXACTLY 20 measures. No more, no less.
 Ensure formulas are valid SQL.
 NEVER nest aggregate functions inside other aggregates (e.g. AVG(SUM(x)) is INVALID). Use ratios instead.
 """

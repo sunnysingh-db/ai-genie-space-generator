@@ -30,7 +30,7 @@ class AutoConfigurator:
                  llm_model: str = None, sample_rows: int = 5, max_workers: int = 10):
         self.catalog = catalog
         self.schema = schema
-        self.config_path = config_path
+        self.config_path = self._resolve_path(config_path)
         self.sample_rows = sample_rows
         self.max_workers = max_workers
         self.spark = SparkSession.builder.getOrCreate()
@@ -257,7 +257,8 @@ RULES:
         """Display only an HTML banner with config link — no text output."""
         from IPython.display import display, HTML
 
-        config_ws_path = self.config_path.replace('/Workspace', '', 1) if self.config_path.startswith('/Workspace') else self.config_path
+        config_abs = self.config_path
+        config_ws_path = config_abs.replace('/Workspace', '', 1) if config_abs.startswith('/Workspace') else config_abs
         space_name = updated.get('genie_space_name', 'Analytics Space')
         n_tables = len(updated.get('exclude_table_patterns', []))
         n_questions = len(updated.get('sample_questions', []))
@@ -343,6 +344,17 @@ RULES:
         display(HTML(html))
 
     # ─── Helpers ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _resolve_path(path: str) -> str:
+        """Resolve a path to absolute, using this module's location for relative paths."""
+        if os.path.isabs(path):
+            return path
+        # This module lives at framework/auto_configurator.py
+        # Go up one level from framework/ to reach the project root (notebook directory)
+        module_dir = os.path.dirname(os.path.abspath(__file__))
+        project_dir = os.path.dirname(module_dir)
+        return os.path.normpath(os.path.join(project_dir, path))
 
     @staticmethod
     def _quote(identifier: str) -> str:
