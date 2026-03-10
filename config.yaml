@@ -9,64 +9,62 @@ catalog: sunny_uc
 schema: demo
 
 # ── Genie Space ────────────────────────────────────────────────────────
-genie_space_name: "Food Delivery & Aviation Analytics"
+genie_space_name: "Food, Aviation & Ops Analytics"
 
 # ── AI Model ───────────────────────────────────────────────────────────
-llm_model: databricks-claude-sonnet-4-5
+# Options: databricks-claude-opus-4-6, databricks-meta-llama-3-1-405b-instruct
+llm_model: databricks-claude-sonnet-4-6
 
 # ── Table Filtering ────────────────────────────────────────────────────
 exclude_table_patterns:
-  - "_quality_monitoring_summary"
-  - "abac_data"
-  - "agent_%"
-  - "fin-agent_%"
-  - "hr-agent_%"
-  - "legal-agent_%"
-  - "food_langraph%"
-  - "genie_agent_%"
-  - "langchain_agent%"
-  - "streaming_agent_%"
-  - "test_agent%"
-  - "monitor_%"
+  - "%_payload%"
+  - "%_request_logs%"
+  - "%_assessment_logs%"
   - "trace_logs_%"
-  - "dashboard_baseline"
-  - "dashboard_test%"
-  - "df_fs"
-  - "dummy_data"
-  - "features"
-  - "source"
-  - "car_features"
-  - "vs_%"
-  - "contract_metadata"
+  - "%_monitoring%"
+  - "vs_embeddings"
+  - "vs_chunks"
+  - "vs_raw"
   - "vs_pdf_split"
+  - "dashboard_test%"
+  - "dashboard_baseline%"
+  - "df_fs"
+  - "abac_data"
+  - "dummy%"
+  - "source"
+  - "features"
+  - "car_features"
+  - "agent_evaluation_set"
+  - "agent_traces"
+  - "agent_assessments"
 
 # ============================================================
 # Business Context (auto-generated from schema analysis)
 # ============================================================
 
 # Q1: What does your business do?
-business_domain: "Multi-domain platform covering food delivery operations (orders, restaurants, drivers, payments, reviews) and aviation operations (flights, bookings, airlines, airports, passengers) with procurement vendor payment tracking."
+business_domain: "Multi-domain platform covering food delivery, aviation bookings, procurement, and AI agent operations across multiple cities and industries."
 
 # Q2: What data is tracked in these tables?
-data_description: "Food orders, restaurants, drivers, payments, reviews, users; flights, bookings, airlines, airports, passengers; and procurement vendor invoices with early payment tracking."
+data_description: "Food orders, restaurants, drivers, payments, reviews, flights, bookings, airlines, passengers, procurement invoices, and contract metadata."
 
 # Q3: Who uses this data and what decisions do they make?
-stakeholders_and_decisions: "Ops managers optimize delivery times and driver performance; revenue analysts monitor booking fares, occupancy, and procurement payment compliance."
+stakeholders_and_decisions: "Ops managers track delivery and flight performance; finance teams monitor payments and procurement; analysts review ratings and revenue."
 
 # Q4: Any other important context? (optional)
-additional_context: "Orders span Oct 2025–Feb 2026; loyalty tiers: bronze, silver, gold; flight statuses: Completed, Delayed, Cancelled; procurement BUs: Cement, Ports."
+additional_context: "Orders span Oct 2025–Feb 2026; loyalty tiers: bronze, silver, gold; flight statuses: Completed, Delayed, Cancelled; currencies: INR."
 
 # ============================================================
 # Sample Questions (auto-generated)
 # ============================================================
 sample_questions:
-  - "What is average delivery time by cuisine type?"
-  - "Which drivers have the highest ratings this month?"
-  - "What are total orders by delivery status?"
-  - "Which airlines have the highest average occupancy rate?"
-  - "What is revenue breakdown by cabin class?"
-  - "Which restaurants have the most failed orders?"
-  - "What are top payment methods by total amount?"
-  - "Which cities generate the most food delivery revenue?"
-  - "How many early payment instances per business unit?"
-  - "What is average flight delay by airline?"
+  - "What is the average delivery time by restaurant?"
+  - "Which restaurants have the highest customer ratings?"
+  - "What are total orders by status?"
+  - "Which airlines have the most delayed flights?"
+  - "What is average booking fare by cabin class?"
+  - "Which drivers have the most deliveries this month?"
+  - "What is total payment amount by payment method?"
+  - "Which vendors have the most early payments?"
+  - "What is occupancy rate by airline?"
+  - "Which cities have the most active users?"

@@ -331,13 +331,19 @@ Example start: [{{"name": "order_date", "column": "order_date", "table": "orders
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
         
-        # Prepare shared context
-        numeric_cols = []
+        # Prepare shared context — group numeric columns by table for clarity
+        numeric_cols_map = {}
         for col in metadata['columns']:
             data_type = col['data_type'].lower()
             if any(x in data_type for x in ['int', 'long', 'double', 'float', 'decimal']):
-                numeric_cols.append(f"{col['table_name']}.{col['column_name']}")
-        numeric_cols_str = ", ".join(numeric_cols[:30])
+                table = col['table_name']
+                if table not in numeric_cols_map:
+                    numeric_cols_map[table] = []
+                numeric_cols_map[table].append(col['column_name'])
+        numeric_cols_by_table = "\n".join(
+            f"  {t}: {', '.join(cols[:10])}"
+            for t, cols in list(numeric_cols_map.items())[:10]
+        )
         
         if dimensions:
             dimensions_str = ", ".join([d['name'] for d in dimensions[:10]])
@@ -350,7 +356,7 @@ Example start: [{{"name": "order_date", "column": "order_date", "table": "orders
             dimensions_str = ", ".join(dim_cols[:10])
         
         shared_context = {
-            "numeric_cols_str": numeric_cols_str,
+            "numeric_cols_by_table": numeric_cols_by_table,
             "dimensions_str": dimensions_str
         }
         
@@ -403,11 +409,16 @@ Example start: [{{"name": "order_date", "column": "order_date", "table": "orders
 BUSINESS CONTEXT:
 {self.business_context}
 {self._questions_prompt}
-AVAILABLE NUMERIC COLUMNS:
-{shared_context['numeric_cols_str']}
+AVAILABLE NUMERIC COLUMNS (grouped by table):
+{shared_context['numeric_cols_by_table']}
 
 AVAILABLE DIMENSIONS:
 {shared_context['dimensions_str']}
+
+CRITICAL RULE — TABLE-PREFIXED COLUMNS:
+Every column reference in your formulas MUST use table_name.column_name format.
+Example: SUM(orders.total_amount) — NOT SUM(total_amount).
+This is mandatory because columns from different tables may share names.
 """
     
     def _generate_measures_simple(self, shared_context: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -425,7 +436,8 @@ For each measure provide:
 {{{{
   "name": "measure_name",
   "display_name": "Human Readable Name",
-  "formula": "Valid SQL aggregation formula",
+  "table": "primary_table_name",
+  "formula": "SQL aggregation using table.column format",
   "type": "simple",
   "description": "What this metric measures in business terms",
   "synonyms": ["synonym1", "synonym2", "synonym3"]
@@ -436,6 +448,7 @@ Start with [ and end with ].
 Generate EXACTLY 10 measures. No more, no less.
 Ensure formulas are valid SQL.
 NEVER nest aggregate functions inside other aggregates (e.g. AVG(SUM(x)) is INVALID).
+ALWAYS use table_name.column_name in formulas (e.g. SUM(orders.total_amount), not SUM(total_amount)).
 """
         response = self.llm.invoke(prompt)
         return self._parse_json_response(response.content, expected_type=list)
@@ -449,16 +462,17 @@ TASK:
 Generate EXACTLY 15 measures covering Ratios and Percentages ONLY:
 
 - Ratios (6): Division between two aggregates (e.g., revenue per order, average fare per passenger)
-  Example: {{{{"name": "revenue_per_booking", "formula": "SUM(total_fare) / COUNT(DISTINCT booking_id)", "type": "derived"}}}}
+  Example: {{{{"name": "revenue_per_booking", "table": "bookings", "formula": "SUM(bookings.total_fare) / COUNT(DISTINCT bookings.booking_id)", "type": "derived"}}}}
 
 - Percentages (4): Proportion calculations expressed as percentages
-  Example: {{{{"name": "cancellation_rate", "formula": "COUNT(CASE WHEN status='Cancelled' THEN 1 END) * 100.0 / COUNT(*)", "type": "derived"}}}}
+  Example: {{{{"name": "cancellation_rate", "table": "orders", "formula": "COUNT(CASE WHEN orders.status='Cancelled' THEN 1 END) * 100.0 / COUNT(*)", "type": "derived"}}}}
 
 For each measure provide:
 {{{{
   "name": "measure_name",
   "display_name": "Human Readable Name",
-  "formula": "Valid SQL aggregation formula",
+  "table": "primary_table_name",
+  "formula": "SQL aggregation using table.column format",
   "type": "derived",
   "description": "What this metric measures in business terms",
   "synonyms": ["synonym1", "synonym2", "synonym3"]
@@ -469,6 +483,7 @@ Start with [ and end with ].
 Generate EXACTLY 15 measures. No more, no less.
 Ensure formulas are valid SQL.
 NEVER nest aggregate functions inside other aggregates (e.g. AVG(SUM(x)) is INVALID). Use ratios instead.
+ALWAYS use table_name.column_name in formulas (e.g. SUM(bookings.total_fare), not SUM(total_fare)).
 """
         response = self.llm.invoke(prompt)
         return self._parse_json_response(response.content, expected_type=list)
@@ -488,14 +503,15 @@ These are complex, multi-column business calculations such as:
 - Compound metrics combining multiple columns or tables
 
 Examples:
-- {{{{"name": "premium_cabin_share", "formula": "COUNT(CASE WHEN cabin_class IN ('Business','First') THEN 1 END) * 100.0 / COUNT(*)", "type": "derived"}}}}
-- {{{{"name": "ancillary_revenue_per_pax", "formula": "SUM(taxes_and_fees) / COUNT(DISTINCT passenger_id)", "type": "derived"}}}}
+- {{{{"name": "premium_cabin_share", "table": "bookings", "formula": "COUNT(CASE WHEN bookings.cabin_class IN ('Business','First') THEN 1 END) * 100.0 / COUNT(*)", "type": "derived"}}}}
+- {{{{"name": "ancillary_revenue_per_pax", "table": "bookings", "formula": "SUM(bookings.taxes_and_fees) / COUNT(DISTINCT bookings.passenger_id)", "type": "derived"}}}}
 
 For each measure provide:
 {{{{
   "name": "measure_name",
   "display_name": "Human Readable Name",
-  "formula": "Valid SQL aggregation formula",
+  "table": "primary_table_name",
+  "formula": "SQL aggregation using table.column format",
   "type": "derived",
   "description": "What this metric measures in business terms",
   "synonyms": ["synonym1", "synonym2", "synonym3"]
@@ -506,6 +522,7 @@ Start with [ and end with ].
 Generate EXACTLY 20 measures. No more, no less.
 Ensure formulas are valid SQL.
 NEVER nest aggregate functions inside other aggregates (e.g. AVG(SUM(x)) is INVALID). Use ratios instead.
+ALWAYS use table_name.column_name in formulas (e.g. SUM(orders.total_amount), not SUM(total_amount)).
 """
         response = self.llm.invoke(prompt)
         return self._parse_json_response(response.content, expected_type=list)

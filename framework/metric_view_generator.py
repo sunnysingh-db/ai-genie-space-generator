@@ -166,22 +166,41 @@ class MetricViewGenerator:
         }
     
     def _group_metrics_by_table(self, config: Dict[str, Any]) -> Dict[str, List[Dict]]:
-        """Group metrics by their primary table based on formula analysis."""
+        """Group metrics by their primary table using a 3-tier strategy:
+        
+        1. Explicit 'table' field from LLM (most reliable)
+        2. Formula regex for table.column patterns (fallback)
+        3. Column-name matching against actual table schemas (last resort)
+        """
         metrics_by_table = {}
         
         relevant_tables = config.get('relevant_tables', [])
-        # Fix: LLM generates 'measures' not 'metrics'
         metrics = config.get('measures', config.get('metrics', []))
         
         if not relevant_tables or not metrics:
             return metrics_by_table
         
-        generic_metrics = []  # Metrics without explicit table references (e.g. COUNT(*))
+        # Pre-fetch column sets for each relevant table (for tier 3 fallback)
+        table_columns = {}
+        for table in relevant_tables:
+            table_columns[table] = self._get_valid_columns(table)
+        
+        generic_metrics = []
         
         for metric in metrics:
             formula = metric.get('formula', '')
+            assigned = False
             
-            # Count table references in the formula (table.column patterns)
+            # --- Tier 1: Use explicit 'table' field from LLM ---
+            explicit_table = metric.get('table', '').strip()
+            if explicit_table and explicit_table in relevant_tables:
+                if explicit_table not in metrics_by_table:
+                    metrics_by_table[explicit_table] = []
+                metrics_by_table[explicit_table].append(metric)
+                assigned = True
+                continue
+            
+            # --- Tier 2: Parse table.column references in formula ---
             table_refs = {}
             for table in relevant_tables:
                 pattern = rf'\b{re.escape(table)}\.'
@@ -190,14 +209,43 @@ class MetricViewGenerator:
                     table_refs[table] = count
             
             if table_refs:
-                # Assign to the most-referenced table
                 primary = max(table_refs, key=table_refs.get)
                 if primary not in metrics_by_table:
                     metrics_by_table[primary] = []
                 metrics_by_table[primary].append(metric)
-            else:
-                # Generic metric (e.g., COUNT(*)) - collect separately
-                generic_metrics.append(metric)
+                assigned = True
+                continue
+            
+            # --- Tier 3: Match bare column names against table schemas ---
+            # Extract bare identifiers from formula (excluding SQL keywords)
+            sql_keywords = {'SELECT', 'FROM', 'WHERE', 'AND', 'OR', 'NOT', 'IN', 'IS', 'NULL',
+                          'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'AS', 'DISTINCT', 'BETWEEN',
+                          'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'PERCENTILE_CONT', 'WITHIN',
+                          'GROUP', 'ORDER', 'BY', 'CAST', 'FLOAT', 'INT', 'DOUBLE', 'TRUE', 'FALSE',
+                          'OVER', 'PARTITION', 'STDDEV', 'VARIANCE'}
+            bare_refs = set()
+            for ref in re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\b', formula):
+                if ref.upper() not in sql_keywords and not ref.isdigit():
+                    bare_refs.add(ref)
+            
+            if bare_refs:
+                # Score each table by how many of its columns appear in the formula
+                table_scores = {}
+                for table in relevant_tables:
+                    matches = bare_refs & table_columns.get(table, set())
+                    if matches:
+                        table_scores[table] = len(matches)
+                
+                if table_scores:
+                    primary = max(table_scores, key=table_scores.get)
+                    if primary not in metrics_by_table:
+                        metrics_by_table[primary] = []
+                    metrics_by_table[primary].append(metric)
+                    assigned = True
+                    continue
+            
+            # --- Fallback: generic metric (e.g., COUNT(*)) ---
+            generic_metrics.append(metric)
         
         # Assign generic metrics to the table with the most specific metrics
         if generic_metrics:
