@@ -9,7 +9,7 @@ import warnings
 # Suppress LangChain deprecation warnings
 warnings.filterwarnings('ignore', message='.*databricks_langchain.*')
 
-from langchain_databricks import ChatDatabricks
+from .resilient_llm import ResilientLLM
 from typing import Dict, Any, List
 import json
 import re
@@ -18,13 +18,23 @@ import time
 class LLMOrchestrator:
     """Orchestrates multi-step LLM-powered generation of metric views and Genie configurations."""
     
-    def __init__(self, business_context: str, llm_model: str = "databricks-claude-opus-4-6", sample_questions: list = None):
+    # Default model pool for distributing calls across endpoints
+    DEFAULT_MODEL_POOL = [
+        "databricks-claude-sonnet-4-6",
+        "databricks-claude-opus-4-6",
+        "databricks-claude-sonnet-4-5",
+    ]
+
+    def __init__(self, business_context: str, llm_model: str = "databricks-claude-opus-4-6",
+                 model_pool: list = None, sample_questions: list = None):
         """
-        Initialize LLM orchestrator with specified foundation model.
+        Initialize LLM orchestrator with resilient multi-model support.
         
         Args:
             business_context: Business context describing what metrics matter
-            llm_model: Databricks Foundation Model endpoint (default: databricks-claude-opus-4-6)
+            llm_model: Primary Databricks Foundation Model endpoint (used as fallback if model_pool is empty)
+            model_pool: List of model endpoints for load distribution and failover.
+                        If not provided, defaults to DEFAULT_MODEL_POOL.
             sample_questions: User-provided sample questions from config (drives metric generation)
         """
         self.business_context = business_context
@@ -43,11 +53,18 @@ class LLMOrchestrator:
         import warnings
         warnings.filterwarnings('ignore', category=Warning)
         
-        self.llm = ChatDatabricks(
-            endpoint=llm_model,
+        # Build model pool: explicit pool > config pool > default pool
+        pool = model_pool if model_pool else self.DEFAULT_MODEL_POOL
+        # Ensure primary model is in the pool
+        if llm_model and llm_model not in pool:
+            pool = [llm_model] + pool
+        
+        print(f"  🔀 Model pool: {pool}")
+        
+        self.llm = ResilientLLM(
+            model_pool=pool,
             temperature=0,
-            timeout=900  # 15 minutes for longer generations (increased from 10)
-            # No max_tokens limit - Foundation models can generate comprehensive outputs
+            timeout=900,  # 15 minutes for longer generations
         )
     
     def generate_metrics_config(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
@@ -638,7 +655,7 @@ Example start: {{"joins": [{{"left_table": "orders", ...
                 f"  {i+1}. {q}" for i, q in enumerate(self.sample_questions)
             ) + "\n"
         
-        prompt = f"""You are a business analyst creating sample questions for a BI tool.
+        prompt = f"""You are a senior business analyst creating sample questions for a self-service BI tool used by non-technical business users.
 
 BUSINESS CONTEXT:
 {self.business_context}
@@ -655,16 +672,24 @@ plus 5 additional questions. Each question must have a valid SQL query.
 
 For each question provide:
 {{
-  "question": "Natural language question users might ask",
+  "question": "Plain natural language question as a business user would ask aloud",
   "sql": "Simple SQL query (keep under 150 characters)",
-  "description": "What business insight this provides"
+  "description": "What business insight this provides, in plain language"
 }}
 
-CRITICAL: Your response must be ONLY a JSON array. No explanations, no markdown.
+CRITICAL RULES FOR QUESTIONS:
+- Write the "question" in everyday BUSINESS LANGUAGE — as if a manager is asking a colleague
+- NEVER use column names, table names, struct paths, or any technical identifiers in the "question"
+- NEVER use underscores, dots, or camelCase in the "question" text
+- The SQL can and should use correct technical column names — only the "question" must be natural language
+- BAD question: "What is total usage_quantity by billing_origin_product?" (exposes column names)
+- GOOD question: "Which product categories are driving the highest resource consumption?"
+- BAD question: "Show product_features.is_serverless breakdown" (exposes struct path)
+- GOOD question: "How does serverless spending compare to traditional compute?"
+
+Your response must be ONLY a JSON array. No explanations, no markdown.
 Start with [ and end with ].
 Keep SQL queries SHORT and simple.
-
-Example start: [{{"question": "What is the total revenue by month?", "sql": "SELECT DATE_TRUNC('month', order_date), SUM(revenue) FROM orders GROUP BY 1", ...
 """
         
         response = self.llm.invoke(prompt)
@@ -692,8 +717,8 @@ Example start: [{{"question": "What is the total revenue by month?", "sql": "SEL
             for m in measures[:20]
         ])
         
-        # Compact, KPI-driven prompt
-        prompt = f"""You are a business intelligence analyst creating a quick-reference guide.
+        # Compact, KPI-driven prompt — business language only
+        prompt = f"""You are a senior business intelligence analyst creating a quick-reference guide for non-technical business users. Write everything in plain business language — never expose column names, table names, or technical identifiers.
 
 BUSINESS CONTEXT:
 {self.business_context}

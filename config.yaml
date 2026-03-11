@@ -5,11 +5,11 @@
 # ============================================================
 
 # ── Data Location ──────────────────────────────────────────────────────
-catalog: sunny_uc
-schema: demo
+catalog: system
+schema: workflow
 
 # ── Genie Space ────────────────────────────────────────────────────────
-genie_space_name: "Food, Aviation & Ops Analytics"
+genie_space_name: "Workflow & Job Execution Analytics"
 
 # ── AI Model ───────────────────────────────────────────────────────────
 # Options: databricks-claude-opus-4-6, databricks-meta-llama-3-1-405b-instruct
@@ -17,54 +17,34 @@ llm_model: databricks-claude-sonnet-4-6
 
 # ── Table Filtering ────────────────────────────────────────────────────
 exclude_table_patterns:
-  - "%_payload%"
-  - "%_request_logs%"
-  - "%_assessment_logs%"
-  - "trace_logs_%"
-  - "%_monitoring%"
-  - "vs_embeddings"
-  - "vs_chunks"
-  - "vs_raw"
-  - "vs_pdf_split"
-  - "dashboard_test%"
-  - "dashboard_baseline%"
-  - "df_fs"
-  - "abac_data"
-  - "dummy%"
-  - "source"
-  - "features"
-  - "car_features"
-  - "agent_evaluation_set"
-  - "agent_traces"
-  - "agent_assessments"
 
 # ============================================================
 # Business Context (auto-generated from schema analysis)
 # ============================================================
 
 # Q1: What does your business do?
-business_domain: "Multi-domain platform covering food delivery, aviation bookings, procurement, and AI agent operations across multiple cities and industries."
+business_domain: "Databricks platform operations tracking automated data pipeline jobs and task executions across multiple workspaces, supporting engineering and analytics teams running scheduled, continuous, and event-triggered workflows."
 
 # Q2: What data is tracked in these tables?
-data_description: "Food orders, restaurants, drivers, payments, reviews, flights, bookings, airlines, passengers, procurement invoices, and contract metadata."
+data_description: "Automated job definitions with scheduling details, ownership, and tags; individual job run history with start and end times, success or failure outcomes, and how long each phase took; task-level breakdowns within each run including dependencies and error reasons."
 
 # Q3: Who uses this data and what decisions do they make?
-stakeholders_and_decisions: "Ops managers track delivery and flight performance; finance teams monitor payments and procurement; analysts review ratings and revenue."
+stakeholders_and_decisions: "Engineering leads monitor job reliability and failure rates; platform teams investigate slow or queued runs; operations managers track which workspaces consume the most compute; data teams identify recurring failures and optimise pipeline scheduling."
 
 # Q4: Any other important context? (optional)
-additional_context: "Orders span Oct 2025–Feb 2026; loyalty tiers: bronze, silver, gold; flight statuses: Completed, Delayed, Cancelled; currencies: INR."
+additional_context: "Data covers November 2025 to March 2026. Jobs are triggered by schedules, file arrivals, table updates, or run continuously. Run outcomes include Succeeded, Failed, Cancelled, Timed Out, and Skipped. Job runs link to individual tasks, and tasks link back to their parent job definitions."
 
 # ============================================================
 # Sample Questions (auto-generated)
 # ============================================================
 sample_questions:
-  - "What is the average delivery time by restaurant?"
-  - "Which restaurants have the highest customer ratings?"
-  - "What are total orders by status?"
-  - "Which airlines have the most delayed flights?"
-  - "What is average booking fare by cabin class?"
-  - "Which drivers have the most deliveries this month?"
-  - "What is total payment amount by payment method?"
-  - "Which vendors have the most early payments?"
-  - "What is occupancy rate by airline?"
-  - "Which cities have the most active users?"
+  - "What percentage of job runs succeeded versus failed over the past 30 days?"
+  - "Which jobs have the highest failure rate and what are the most common reasons they fail?"
+  - "How has the average time jobs spend waiting in the queue changed over the past month?"
+  - "Which workspaces are running the most jobs and which ones have the most failures?"
+  - "What are the top 10 longest-running jobs on average, and how much time do they spend on setup versus actual execution?"
+  - "How many jobs are triggered on a schedule compared to those triggered by file arrivals or table updates?"
+  - "Which individual tasks within jobs fail most often, and what errors are causing those failures?"
+  - "Are there any jobs that consistently time out, and how long do they typically run before timing out?"
+  - "How does job execution performance this month compare to last month across all workspaces?"
+  - "Which job owners or teams have the most cancelled or failed runs, and is the trend improving or worsening?"

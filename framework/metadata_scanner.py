@@ -91,6 +91,7 @@ class MetadataScanner:
         Query information_schema.tables for table metadata.
         Supports scanning 100+ tables without limits.
         Applies configurable exclusion patterns.
+        Cross-validates against SHOW TABLES to exclude phantom/stale entries.
         """
         # Build WHERE clause with dynamic exclusion patterns
         where_clauses = [
@@ -124,10 +125,27 @@ class MetadataScanner:
         
         df = self.spark.sql(query)
         tables = [row.asDict() for row in df.collect()]
+        info_schema_count = len(tables)
+        print(f"  📋 information_schema reports {info_schema_count} tables")
+        
+        # Cross-validate with SHOW TABLES to filter out phantom/stale entries
+        # that appear in information_schema but are not actually queryable
+        show_df = self.spark.sql(
+            f"SHOW TABLES IN {self.quoted_catalog}.{self.quoted_schema}"
+        )
+        existing_names = {row.tableName for row in show_df.collect()}
+        
+        tables = [t for t in tables if t['table_name'] in existing_names]
+        # Store validated names for use by _get_columns()
+        self._validated_table_names = {t['table_name'] for t in tables}
+        
+        filtered_count = info_schema_count - len(tables)
+        if filtered_count > 0:
+            print(f"  🧹 Filtered out {filtered_count} phantom table(s) not returned by SHOW TABLES")
         
         # Enhanced logging
         table_count = len(tables)
-        print(f"  ✅ Found {table_count} tables")
+        print(f"  ✅ Found {table_count} validated tables")
         
         if table_count == 0:
             print(f"  ⚠️  Warning: No tables found in {self.full_schema}")
@@ -137,7 +155,8 @@ class MetadataScanner:
         return tables
     
     def _get_columns(self) -> List[Dict[str, Any]]:
-        """Query information_schema.columns for column metadata."""
+        """Query information_schema.columns for column metadata.
+        Filters to only include columns from validated tables."""
         query = f"""
             SELECT 
                 table_catalog,
@@ -156,7 +175,16 @@ class MetadataScanner:
         
         df = self.spark.sql(query)
         columns = [row.asDict() for row in df.collect()]
-        print(f"  📋 Found {len(columns)} columns across all tables")
+        total = len(columns)
+        
+        # Filter to only include columns from validated tables
+        # _validated_table_names is set by _get_tables() which runs first in scan()
+        if hasattr(self, '_validated_table_names') and self._validated_table_names:
+            columns = [c for c in columns if c['table_name'] in self._validated_table_names]
+            if len(columns) < total:
+                print(f"  🧹 Filtered columns: {total} → {len(columns)} (removed phantom table columns)")
+        
+        print(f"  📋 Found {len(columns)} columns across validated tables")
         return columns
     
     def _sample_tables(self, tables: List[Dict[str, Any]], limit: int = 100, max_workers: int = 10) -> Dict[str, List[Dict]]:

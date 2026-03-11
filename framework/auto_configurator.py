@@ -26,8 +26,16 @@ class AutoConfigurator:
         'sample_questions'
     ]
 
+    # Default model pool for distributing calls across endpoints
+    DEFAULT_MODEL_POOL = [
+        "databricks-claude-sonnet-4-6",
+        "databricks-claude-opus-4-6",
+        "databricks-claude-sonnet-4-5",
+    ]
+
     def __init__(self, catalog: str, schema: str, config_path: str,
-                 llm_model: str = None, sample_rows: int = 5, max_workers: int = 10):
+                 llm_model: str = None, model_pool: list = None,
+                 sample_rows: int = 5, max_workers: int = 10):
         self.catalog = catalog
         self.schema = schema
         self.config_path = self._resolve_path(config_path)
@@ -43,6 +51,10 @@ class AutoConfigurator:
 
         self.existing_llm = self.existing_config.get('llm_model', 'databricks-claude-opus-4-6')
         self.model = llm_model or self.existing_llm
+        self.model_pool = model_pool if model_pool else self.DEFAULT_MODEL_POOL
+        # Ensure primary model is in the pool
+        if self.model and self.model not in self.model_pool:
+            self.model_pool = [self.model] + self.model_pool
 
     # ─── Public API ────────────────────────────────────────────────────────
 
@@ -52,7 +64,9 @@ class AutoConfigurator:
         Only output is an HTML banner with a link to open config.yaml.
         """
         all_tables, all_columns, samples = self._scan_metadata()
-        metadata_summary = self._build_summary(all_tables, all_columns, samples)
+        struct_info = self._extract_struct_info([t['table_name'] for t in all_tables])
+        profiles = self._profile_tables([t['table_name'] for t in all_tables], all_columns)
+        metadata_summary = self._build_summary(all_tables, all_columns, samples, struct_info, profiles)
         generated = self._call_llm(metadata_summary)
         updated = self._write_config(generated)
         self._display_result(updated)
@@ -70,6 +84,18 @@ class AutoConfigurator:
             ORDER BY table_name
         """)
         all_tables = [row.asDict() for row in tables_df.collect()]
+
+        # Cross-validate with SHOW TABLES to filter out phantom/stale entries
+        # that appear in information_schema but are not actually queryable
+        show_df = self.spark.sql(f"SHOW TABLES IN {qcat}.{qsch}")
+        existing_names = {row.tableName for row in show_df.collect()}
+
+        pre_count = len(all_tables)
+        all_tables = [t for t in all_tables if t['table_name'] in existing_names]
+        filtered_count = pre_count - len(all_tables)
+        if filtered_count > 0:
+            print(f"  🧹 Filtered out {filtered_count} phantom table(s) not returned by SHOW TABLES")
+
         table_names = [t['table_name'] for t in all_tables]
 
         columns_df = self.spark.sql(f"""
@@ -79,6 +105,9 @@ class AutoConfigurator:
             ORDER BY table_name, ordinal_position
         """)
         all_columns = [row.asDict() for row in columns_df.collect()]
+        # Filter columns to only include validated tables
+        valid_set = set(table_names)
+        all_columns = [c for c in all_columns if c['table_name'] in valid_set]
 
         samples = {}
         def _sample(tbl_name):
@@ -100,7 +129,28 @@ class AutoConfigurator:
 
     # ─── Phase 2: Build Summary ────────────────────────────────────────────
 
-    def _build_summary(self, all_tables, all_columns, samples) -> str:
+    MAX_SUMMARY_CHARS = 80_000  # safe under 4MB payload with prompt overhead
+
+    def _build_summary(self, all_tables, all_columns, samples,
+                       struct_info=None, profiles=None) -> str:
+        """Build a compact but rich metadata summary for the LLM.
+
+        Automatically scales detail level based on number of tables
+        to stay within token budgets. Few tables → rich detail;
+        many tables → compact summaries.
+        """
+        struct_info = struct_info or {}
+        profiles = profiles or {}
+        n_tables = max(len(all_tables), 1)
+
+        # ── Dynamic budget per table ──
+        per_table = self.MAX_SUMMARY_CHARS // n_tables
+        max_struct  = min(12, max(4, per_table // 500))
+        max_dv_vals = min(10, max(3, per_table // 600))
+        max_dv_cols = min(6, max(2, per_table // 800))
+        sample_rows = 1 if per_table > 1500 else 0
+        sample_chars = min(800, max(0, per_table - 400))
+
         cols_by_table = {}
         for c in all_columns:
             cols_by_table.setdefault(c['table_name'], []).append(c)
@@ -109,29 +159,185 @@ class AutoConfigurator:
         for tbl in all_tables:
             tname = tbl['table_name']
             tbl_cols = cols_by_table.get(tname, [])
-            col_info = ", ".join(f"{c['column_name']} ({c['data_type']})" for c in tbl_cols)
-            part = f"TABLE: {tname}\n  Columns: {col_info}"
+
+            # ── Column listing with struct expansion ──
+            col_parts = []
+            for c in tbl_cols:
+                cname, dtype = c['column_name'], c['data_type']
+                struct_fields = struct_info.get(tname, {}).get(cname)
+                if struct_fields:
+                    shown = struct_fields[:max_struct]
+                    suffix = f", +{len(struct_fields)-max_struct} more" if len(struct_fields) > max_struct else ""
+                    col_parts.append(f"{cname} ({dtype}: {', '.join(shown)}{suffix})")
+                else:
+                    col_parts.append(f"{cname} ({dtype})")
+
+            part = f"TABLE: {tname}\n  Columns: {', '.join(col_parts)}"
+
             if tbl.get('comment'):
-                part += f"\n  Comment: {tbl['comment']}"
-            if samples.get(tname):
-                sample_str = json.dumps(samples[tname][:3], default=str)
-                if len(sample_str) > 1500:
-                    sample_str = sample_str[:1500] + "...(truncated)"
+                part += f"\n  Comment: {tbl['comment'][:120]}"
+
+            # ── Profile: date ranges + distinct values ──
+            tbl_profile = profiles.get(tname, {})
+            if tbl_profile.get('date_ranges'):
+                dr = tbl_profile['date_ranges']
+                ranges_str = "; ".join(f"{col}: {mn} to {mx}" for col, mn, mx in dr)
+                part += f"\n  Date Ranges: {ranges_str}"
+
+            if tbl_profile.get('distinct_values'):
+                dv_parts = []
+                for col, vals in list(tbl_profile['distinct_values'].items())[:max_dv_cols]:
+                    vals_str = ", ".join(str(v) for v in vals[:max_dv_vals])
+                    if len(vals) > max_dv_vals:
+                        vals_str += f", +{len(vals)-max_dv_vals} more"
+                    dv_parts.append(f"{col}=[{vals_str}]")
+                if dv_parts:
+                    part += f"\n  Key Values: {'; '.join(dv_parts)}"
+
+            # ── Sample rows (only if budget allows) ──
+            if sample_rows and samples.get(tname) and sample_chars > 0:
+                sample_str = json.dumps(samples[tname][:sample_rows], default=str)
+                if len(sample_str) > sample_chars:
+                    sample_str = sample_str[:sample_chars] + "...(truncated)"
                 part += f"\n  Sample: {sample_str}"
+
             parts.append(part)
 
-        return "\n\n".join(parts)
+        summary = "\n\n".join(parts)
+
+        # ── Final safety cap ──
+        if len(summary) > self.MAX_SUMMARY_CHARS:
+            summary = summary[:self.MAX_SUMMARY_CHARS] + "\n...(truncated to fit token budget)"
+
+        return summary
+
+    # ─── Phase 2a: Struct Field Extraction ─────────────────────────────────
+
+    def _extract_struct_info(self, table_names) -> dict:
+        """Extract nested field names for STRUCT/MAP columns using spark schema.
+        Returns {table_name: {column_name: [field_name, ...]}}.
+        Lightweight — reads only table metadata, no data scan."""
+        qcat, qsch = self._quote(self.catalog), self._quote(self.schema)
+        result = {}
+
+        def _get_nested_fields(dtype, prefix="", depth=0, max_depth=2):
+            """Recursively extract field names up to max_depth."""
+            fields = []
+            if hasattr(dtype, 'fields') and depth < max_depth:
+                for f in dtype.fields:
+                    if hasattr(f.dataType, 'fields') and depth + 1 < max_depth:
+                        fields.extend(_get_nested_fields(f.dataType, f.name + ".", depth + 1, max_depth))
+                    else:
+                        fields.append(f"{prefix}{f.name}")
+            return fields
+
+        for tname in table_names:
+            try:
+                schema = self.spark.table(f"{qcat}.{qsch}.{self._quote(tname)}").schema
+                tbl_structs = {}
+                for field in schema.fields:
+                    if hasattr(field.dataType, 'fields'):
+                        sub = _get_nested_fields(field.dataType)
+                        if sub:
+                            tbl_structs[field.name] = sub
+                    elif hasattr(field.dataType, 'keyType'):
+                        # MAP type — note key/value types
+                        tbl_structs[field.name] = [f"key:{field.dataType.keyType.simpleString()}", f"value:{field.dataType.valueType.simpleString()}"]
+                if tbl_structs:
+                    result[tname] = tbl_structs
+            except Exception:
+                pass  # skip tables that can't be read
+        return result
+
+    # ─── Phase 2b: Lightweight Data Profiling ──────────────────────────────
+
+    def _profile_tables(self, table_names, all_columns) -> dict:
+        """Profile tables to extract date ranges and distinct values for
+        low-cardinality categorical columns. Runs ONE SQL per table over
+        a 50k-row sub-sample for speed. Returns {table_name: {date_ranges, distinct_values}}."""
+        qcat, qsch = self._quote(self.catalog), self._quote(self.schema)
+        profiles = {}
+        MAX_SAMPLE = 50000
+        LOW_CARDINALITY_THRESHOLD = 30
+
+        cols_by_table = {}
+        for c in all_columns:
+            cols_by_table.setdefault(c['table_name'], []).append(c)
+
+        def _profile_one(tname):
+            tbl_cols = cols_by_table.get(tname, [])
+            date_cols = [c['column_name'] for c in tbl_cols if c['data_type'] in ('DATE', 'TIMESTAMP')]
+            str_cols = [c['column_name'] for c in tbl_cols if c['data_type'] == 'STRING']
+
+            if not date_cols and not str_cols:
+                return tname, {}
+
+            fqn = f"{qcat}.{qsch}.{self._quote(tname)}"
+            exprs = []
+            # Date ranges
+            for dc in date_cols:
+                qdc = self._quote(dc)
+                exprs.append(f"CAST(MIN({qdc}) AS STRING) AS `min__{dc}`")
+                exprs.append(f"CAST(MAX({qdc}) AS STRING) AS `max__{dc}`")
+            # Approx distinct counts for string columns
+            for sc in str_cols:
+                qsc = self._quote(sc)
+                exprs.append(f"APPROX_COUNT_DISTINCT({qsc}) AS `acd__{sc}`")
+
+            if not exprs:
+                return tname, {}
+
+            try:
+                sql = f"SELECT {', '.join(exprs)} FROM (SELECT * FROM {fqn} LIMIT {MAX_SAMPLE})"
+                row = self.spark.sql(sql).collect()[0]
+                row_dict = row.asDict()
+
+                # Extract date ranges
+                date_ranges = []
+                for dc in date_cols:
+                    mn = row_dict.get(f"min__{dc}")
+                    mx = row_dict.get(f"max__{dc}")
+                    if mn and mx:
+                        date_ranges.append((dc, str(mn), str(mx)))
+
+                # Identify low-cardinality columns, then collect their distinct values
+                low_card = [sc for sc in str_cols if (row_dict.get(f"acd__{sc}") or 999) <= LOW_CARDINALITY_THRESHOLD]
+
+                distinct_values = {}
+                if low_card:
+                    dv_exprs = [f"COLLECT_SET({self._quote(sc)}) AS `vals__{sc}`" for sc in low_card]
+                    dv_sql = f"SELECT {', '.join(dv_exprs)} FROM (SELECT * FROM {fqn} LIMIT {MAX_SAMPLE})"
+                    dv_row = self.spark.sql(dv_sql).collect()[0].asDict()
+                    for sc in low_card:
+                        vals = dv_row.get(f"vals__{sc}", [])
+                        if vals:
+                            distinct_values[sc] = sorted([v for v in vals if v], key=str)
+
+                return tname, {'date_ranges': date_ranges, 'distinct_values': distinct_values}
+            except Exception:
+                return tname, {}
+
+        # Run profiling in parallel
+        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+            futures = {pool.submit(_profile_one, t): t for t in table_names}
+            for fut in as_completed(futures):
+                tname, profile = fut.result()
+                if profile:
+                    profiles[tname] = profile
+
+        return profiles
 
     # ─── Phase 3: LLM Call ─────────────────────────────────────────────────
 
     def _call_llm(self, metadata_summary: str) -> Dict[str, Any]:
-        from langchain_databricks import ChatDatabricks
+        from .resilient_llm import ResilientLLM
         import warnings
         warnings.filterwarnings('ignore', category=Warning)
 
-        llm = ChatDatabricks(endpoint=self.model, temperature=0, timeout=900)
+        llm = ResilientLLM(model_pool=self.model_pool, temperature=0, timeout=900)
 
         prompt = f"""Analyse this Unity Catalog schema metadata and generate concise configuration values for a Genie Space.
+You are writing for BUSINESS ANALYSTS, not engineers. All user-facing text must be in plain natural language.
 
 CATALOG: {self.catalog}
 SCHEMA: {self.schema}
@@ -146,19 +352,30 @@ Return a JSON object with EXACTLY these keys. STRICT LENGTH LIMITS — exceed th
 
 2. "exclude_table_patterns": JSON array of SQL LIKE patterns for system/monitoring/logging/test tables to exclude. Empty array [] if all are business-relevant.
 
-3. "business_domain": MAX 25 WORDS. What the business does. Example: "Food delivery platform operating across 5 cities with 200 restaurants, 50 drivers, and integrated payment processing."
+3. "business_domain": MAX 30 WORDS. Plain business language. What the organisation does — mention real products, services, or operations found in the data. Example: "Global food delivery service operating across 5 cities with 200 partner restaurants and 50 delivery drivers."
 
-4. "data_description": MAX 30 WORDS. What data the tables track. Example: "Orders, restaurants, drivers, payments, and reviews for food delivery; flights, bookings, airlines, and passengers for aviation operations."
+4. "data_description": MAX 50 WORDS. Written for a business analyst — describe WHAT business concepts are tracked, not column names. Reference the richness of nested/detailed data without exposing technical names. Example: "Customer orders with itemised line details, delivery tracking including driver performance and vehicle information, payment transactions with method breakdowns, and restaurant profiles with cuisine and rating data."
 
-5. "stakeholders_and_decisions": MAX 25 WORDS. Who uses this data and for what. Example: "Ops managers track delivery times and ratings; revenue analysts monitor booking fares and occupancy rates."
+5. "stakeholders_and_decisions": MAX 40 WORDS. Map stakeholders to business decisions in plain language. Example: "Operations managers monitor delivery speed and driver ratings; finance teams track revenue by payment channel; marketing analyses customer segments and booking patterns."
 
-6. "additional_context": MAX 25 WORDS. Key date ranges, categories, or patterns. Example: "Orders span Oct 2025–Feb 2026; loyalty tiers: bronze, silver, gold; flight statuses: Completed, Delayed, Cancelled."
+6. "additional_context": MAX 50 WORDS. Include: actual date ranges, key business categories from the data, and how tables relate to each other — all in plain business language. Example: "Data covers Jan 2024 to Mar 2025. Booking classes include Economy, Business, and First. Orders link to customers, deliveries, and payments. Flight statuses: On-time, Delayed, Cancelled."
 
-7. "sample_questions": JSON array of exactly 10 SHORT questions (MAX 15 WORDS EACH). Example: "What is average delivery time by restaurant?" NOT "What is the average delivery_time_minutes broken down by restaurant_name and how does it compare across different cuisine_type categories?"
+7. "sample_questions": JSON array of exactly 10 questions written as a BUSINESS USER would naturally ask.
+   RULES for questions:
+   - Write in everyday business language — NO column names, NO table names, NO technical syntax
+   - Questions must sound like a manager or analyst speaking aloud
+   - Cover a mix: totals, trends, comparisons, breakdowns, top/bottom performers
+   - Leverage the depth of the data (nested details, tags, categories) but express it in business terms
+   - BAD: "What is usage_quantity by billing_origin_product?" (uses column names)
+   - BAD: "What is cost by product_features.is_serverless?" (exposes struct path)
+   - GOOD: "Which product categories are driving the highest consumption?"
+   - GOOD: "How does serverless spending compare to traditional compute costs?"
+   - GOOD: "Who are the top 10 users by total resource consumption this month?"
 
 RULES:
-- Be extremely concise. Every field must respect its word limit.
-- Use actual values from the sample data — do not hallucinate.
+- ALL text must be in plain business language — no column names, table names, or technical identifiers anywhere.
+- Use ONLY actual business concepts from the metadata — do not hallucinate or invent.
+- Internally understand the struct/nested fields to generate RICH domain-aware content, but express everything in business terms.
 - Return ONLY valid JSON. No markdown, no explanation, no code fences.
 """
 
@@ -366,13 +583,15 @@ RULES:
 # ─── Convenience Function ──────────────────────────────────────────────────
 
 def auto_configure(catalog: str, schema: str, config_path: str,
-                   llm_model: str = None, sample_rows: int = 5, max_workers: int = 10) -> Dict[str, Any]:
+                   llm_model: str = None, model_pool: list = None,
+                   sample_rows: int = 5, max_workers: int = 10) -> Dict[str, Any]:
     """
     Analyse all tables in catalog.schema and auto-update config.yaml values.
     Only output is an HTML banner with a link to open the config file.
     """
     configurator = AutoConfigurator(
         catalog=catalog, schema=schema, config_path=config_path,
-        llm_model=llm_model, sample_rows=sample_rows, max_workers=max_workers
+        llm_model=llm_model, model_pool=model_pool,
+        sample_rows=sample_rows, max_workers=max_workers
     )
     return configurator.run()

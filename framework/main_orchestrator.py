@@ -32,6 +32,7 @@ class GenieSpaceFramework:
         self.schema = self.config_handler.get('schema')
         self.business_context = self.config_handler.get('business_context')
         self.llm_model = self.config_handler.get('llm_model', 'databricks-claude-opus-4-6')
+        self.model_pool = self.config_handler.get('llm_model_pool', None)
         self.sample_questions = self.config_handler.get_sample_questions()
         self.genie_space_name = self.config_handler.get_genie_space_name()
         self.warehouse_id = self.config_handler.get_warehouse_id()
@@ -43,6 +44,8 @@ class GenieSpaceFramework:
         print(f"Catalog: {self.catalog}")
         print(f"Schema: {self.schema}")
         print(f"LLM Model: {self.llm_model}")
+        pool_display = self.model_pool or LLMOrchestrator.DEFAULT_MODEL_POOL
+        print(f"Model Pool: {', '.join(pool_display)}")
         print(f"Genie Space: {self.genie_space_name}")
         print(f"Warehouse: {self.warehouse_id or 'auto-detect'}")
         print(f"Sample Questions: {len(self.sample_questions)} from config")
@@ -71,6 +74,7 @@ class GenieSpaceFramework:
             llm_orchestrator = LLMOrchestrator(
                 business_context=self.business_context,
                 llm_model=self.llm_model,
+                model_pool=self.model_pool,
                 sample_questions=self.sample_questions
             )
             llm_config = llm_orchestrator.generate_metrics_config(metadata)
