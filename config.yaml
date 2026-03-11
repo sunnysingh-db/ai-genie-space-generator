@@ -9,7 +9,7 @@ catalog: system
 schema: workflow
 
 # ── Genie Space ────────────────────────────────────────────────────────
-genie_space_name: "Workflow & Job Execution Analytics"
+genie_space_name: "Workflow & Job Run Analytics"
 
 # ── AI Model ───────────────────────────────────────────────────────────
 # Options: databricks-claude-opus-4-6, databricks-meta-llama-3-1-405b-instruct
@@ -23,28 +23,28 @@ exclude_table_patterns:
 # ============================================================
 
 # Q1: What does your business do?
-business_domain: "Databricks platform operations tracking automated data pipeline jobs and task executions across multiple workspaces, supporting engineering and analytics teams running scheduled, continuous, and event-triggered workflows."
+business_domain: "Databricks platform operations tracking automated workflow jobs across multiple workspaces, monitoring scheduled and triggered job executions, task performance, and run outcomes."
 
 # Q2: What data is tracked in these tables?
-data_description: "Automated job definitions with scheduling details, ownership, and tags; individual job run history with start and end times, success or failure outcomes, and how long each phase took; task-level breakdowns within each run including dependencies and error reasons."
+data_description: "Automated job configurations with scheduling details, run history showing success and failure outcomes, individual task-level execution breakdowns with timing phases, and full change history of job and task setups over time."
 
 # Q3: Who uses this data and what decisions do they make?
-stakeholders_and_decisions: "Engineering leads monitor job reliability and failure rates; platform teams investigate slow or queued runs; operations managers track which workspaces consume the most compute; data teams identify recurring failures and optimise pipeline scheduling."
+stakeholders_and_decisions: "Platform engineers monitor job reliability and failure rates; operations teams track execution durations and queue times; workspace admins review job configurations and ownership across teams."
 
 # Q4: Any other important context? (optional)
-additional_context: "Data covers November 2025 to March 2026. Jobs are triggered by schedules, file arrivals, table updates, or run continuously. Run outcomes include Succeeded, Failed, Cancelled, Timed Out, and Skipped. Job runs link to individual tasks, and tasks link back to their parent job definitions."
+additional_context: "Data covers late 2025 to early 2026. Job trigger types include scheduled, continuous, file arrival, and table updates. Run outcomes include Succeeded, Failed, Error, Cancelled, and Timed Out. Job runs link to individual tasks, compute resources, and configuration history."
 
 # ============================================================
 # Sample Questions (auto-generated)
 # ============================================================
 sample_questions:
-  - "What percentage of job runs succeeded versus failed over the past 30 days?"
-  - "Which jobs have the highest failure rate and what are the most common reasons they fail?"
-  - "How has the average time jobs spend waiting in the queue changed over the past month?"
-  - "Which workspaces are running the most jobs and which ones have the most failures?"
-  - "What are the top 10 longest-running jobs on average, and how much time do they spend on setup versus actual execution?"
-  - "How many jobs are triggered on a schedule compared to those triggered by file arrivals or table updates?"
-  - "Which individual tasks within jobs fail most often, and what errors are causing those failures?"
-  - "Are there any jobs that consistently time out, and how long do they typically run before timing out?"
-  - "How does job execution performance this month compare to last month across all workspaces?"
-  - "Which job owners or teams have the most cancelled or failed runs, and is the trend improving or worsening?"
+  - "Which jobs have the highest failure rate over the past 30 days?"
+  - "How has the average job run duration changed week over week?"
+  - "What are the most common reasons jobs are failing or being terminated?"
+  - "Which workspaces have the most job runs, and how do their success rates compare?"
+  - "How much time are jobs spending waiting in the queue before they start running?"
+  - "Which scheduled jobs are taking the longest to complete end to end?"
+  - "How many jobs are triggered automatically versus run on demand?"
+  - "Which tasks within jobs are failing most frequently and causing overall job failures?"
+  - "Are there any jobs that consistently time out, and how long do they typically run before stopping?"
+  - "How many jobs were created or modified in the last 90 days, and who made those changes?"

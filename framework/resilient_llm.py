@@ -37,6 +37,18 @@ _RATE_LIMIT_SIGNALS = (
     "server_overloaded",
 )
 
+# Timeout errors that are worth retrying (transient network / endpoint slowness)
+_TIMEOUT_SIGNALS = (
+    "timed out",
+    "timeout",
+    "timeouterror",
+    "deadline exceeded",
+    "read timed out",
+    "connect timed out",
+    "gateway timeout",
+    "504",
+)
+
 
 class ResilientLLM:
     """
@@ -148,8 +160,18 @@ class ResilientLLM:
                             f"Backing off {backoff:.0f}s…"
                         )
                     time.sleep(backoff)
+                elif self._is_timeout_error(err_str):
+                    self._retry_count += 1
+                    backoff = self.base_backoff * (2 ** min(attempt, 3))  # cap at 16s (faster retry for timeouts)
+                    if self.verbose:
+                        print(
+                            f"    ⏱️  Timeout on {endpoint} "
+                            f"(attempt {attempt + 1}/{self.max_retries}). "
+                            f"Retrying on next model in {backoff:.0f}s…"
+                        )
+                    time.sleep(backoff)
                 else:
-                    # Non-rate-limit error — don't retry, propagate immediately
+                    # Non-retryable error — propagate immediately
                     raise
 
         # Exhausted all retries
@@ -186,3 +208,8 @@ class ResilientLLM:
     def _is_rate_limit_error(err_str: str) -> bool:
         """Check if the error message indicates a rate-limit / throughput issue."""
         return any(signal in err_str for signal in _RATE_LIMIT_SIGNALS)
+
+    @staticmethod
+    def _is_timeout_error(err_str: str) -> bool:
+        """Check if the error message indicates a timeout (transient, worth retrying on another model)."""
+        return any(signal in err_str for signal in _TIMEOUT_SIGNALS)

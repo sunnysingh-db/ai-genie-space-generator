@@ -549,38 +549,90 @@ ALWAYS use table_name.column_name in formulas (e.g. SUM(orders.total_amount), no
         """
         Step 4: Generate joins between tables and semantic descriptions for tables/columns.
         
+        BATCHED APPROACH: Splits into smaller LLM calls to avoid timeouts on large schemas.
+        1. One lightweight call for joins only (based on table names + relationships)
+        2. Parallel per-table calls for semantic descriptions (table + column descriptions)
+        3. Merge results
+        
         Args:
             metadata: Filtered metadata for relevant tables
             
         Returns:
             Dictionary with joins, table_descriptions, column_descriptions
         """
-        # Format tables
-        tables_info = "\n".join([
-            f"  - {t['table_name']}: {t.get('comment', 'No description')}"
-            for t in metadata['tables']
-        ])
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         
-        # Format columns by table
+        # Build columns by table for reuse
         columns_by_table = {}
         for col in metadata['columns']:
             table = col['table_name']
             if table not in columns_by_table:
                 columns_by_table[table] = []
-            columns_by_table[table].append(f"{col['column_name']} ({col['data_type']})")
+            columns_by_table[table].append({
+                'name': col['column_name'],
+                'type': col['data_type']
+            })
         
-        columns_info = "\n".join([
-            f"  {table}:\n    " + ", ".join(cols[:15])
-            for table, cols in list(columns_by_table.items())[:10]
+        # Step 4a: Generate joins (lightweight call - no column descriptions needed)
+        joins = self._generate_joins_only(metadata)
+        
+        # Step 4b: Generate table/column descriptions in parallel (one call per table)
+        table_descriptions = {}
+        column_descriptions = {}
+        table_list = [t['table_name'] for t in metadata['tables']]
+        
+        if self.llm.verbose:
+            print(f"    📊 Generating semantics for {len(table_list)} tables in parallel...")
+        
+        with ThreadPoolExecutor(max_workers=min(3, len(table_list))) as executor:
+            futures = {
+                executor.submit(
+                    self._generate_table_semantics,
+                    table_name,
+                    columns_by_table.get(table_name, []),
+                    next((t.get('comment', '') for t in metadata['tables'] if t['table_name'] == table_name), '')
+                ): table_name
+                for table_name in table_list
+            }
+            
+            for future in as_completed(futures):
+                table_name = futures[future]
+                try:
+                    result = future.result()
+                    table_descriptions[table_name] = result.get('table_description', '')
+                    column_descriptions.update(result.get('column_descriptions', {}))
+                except Exception as e:
+                    if self.llm.verbose:
+                        print(f"    ⚠️  Semantics for {table_name} failed: {str(e)[:80]}")
+                    # Fallback: use table comment or generic description
+                    table_descriptions[table_name] = next(
+                        (t.get('comment', f'Data from {table_name}') for t in metadata['tables'] if t['table_name'] == table_name),
+                        f'Data from {table_name}'
+                    )
+        
+        return {
+            'joins': joins,
+            'table_descriptions': table_descriptions,
+            'column_descriptions': column_descriptions
+        }
+    
+    def _generate_joins_only(self, metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Generate join definitions only (lightweight LLM call).
+        No column descriptions - just table relationships.
+        """
+        tables_info = "\n".join([
+            f"  - {t['table_name']}: {t.get('comment', 'No description')}"
+            for t in metadata['tables']
         ])
         
         # Format detected relationships
         relationships_info = "\n".join([
-            f"  - {r['from_table']}.{r['from_column']} \u2192 {r['to_table']}.{r['to_column']}"
-            for r in metadata['relationships'][:10]
+            f"  - {r['from_table']}.{r['from_column']} → {r['to_table']}.{r['to_column']}"
+            for r in metadata['relationships'][:15]
         ]) or "  None detected"
         
-        prompt = f"""You are a data analyst creating joins and semantic descriptions.
+        prompt = f"""You are a data analyst defining table joins.
 
 BUSINESS CONTEXT:
 {self.business_context}
@@ -588,50 +640,110 @@ BUSINESS CONTEXT:
 TABLES:
 {tables_info}
 
-COLUMNS BY TABLE:
-{columns_info}
-
-DETECTED RELATIONSHIPS:
+DETECTED RELATIONSHIPS (FK hints):
 {relationships_info}
 
 TASK:
-Generate a JSON object with:
-1. joins: Array of join definitions between tables
-   - relationship_type indicates the cardinality:
-     * MANY_TO_ONE: Multiple left rows map to one right row (e.g., orders → customers)
-     * ONE_TO_MANY: One left row maps to multiple right rows (e.g., customers → orders)
-     * ONE_TO_ONE: One left row maps to at most one right row (e.g., user → user_profile)
-2. table_descriptions: Object mapping table names to business descriptions
-3. column_descriptions: Object mapping "table.column" to business descriptions
+Generate a JSON array of join definitions between these tables.
+- relationship_type indicates cardinality:
+  * MANY_TO_ONE: Multiple left rows → one right row (e.g., orders → customers)
+  * ONE_TO_MANY: One left row → multiple right rows (e.g., customers → orders)  
+  * ONE_TO_ONE: One-to-one mapping (e.g., user → user_profile)
 
 Format:
-{{
-  "joins": [
-    {{
-      "left_table": "table1",
-      "right_table": "table2",
-      "join_type": "INNER|LEFT|RIGHT",
-      "condition": "table1.column = table2.column",
-      "relationship_type": "MANY_TO_ONE|ONE_TO_MANY|ONE_TO_ONE"
-    }}
-  ],
-  "table_descriptions": {{
-    "table_name": "Detailed business description of what this table contains"
-  }},
-  "column_descriptions": {{
-    "table.column": "What this column represents in business terms"
+[
+  {{
+    "left_table": "table1",
+    "right_table": "table2", 
+    "join_type": "INNER|LEFT|RIGHT",
+    "condition": "table1.column = table2.column",
+    "relationship_type": "MANY_TO_ONE|ONE_TO_MANY|ONE_TO_ONE"
   }}
-}}
+]
 
-CRITICAL: Your response must be ONLY a JSON object. No explanations, no markdown.
-Start with {{ and end with }}.
-Keep descriptions concise (1-2 sentences each).
-
-Example start: {{"joins": [{{"left_table": "orders", ...
+CRITICAL: Return ONLY a JSON array. No explanations. Start with [ and end with ].
 """
         
         response = self.llm.invoke(prompt)
-        return self._parse_json_response(response.content, expected_type=dict)
+        return self._parse_json_response(response.content, expected_type=list)
+    
+    def _generate_table_semantics(self, table_name: str, columns: List[Dict], table_comment: str) -> Dict[str, Any]:
+        """
+        Generate semantic descriptions for a single table and its columns.
+        Called in parallel for each table - keeps individual LLM calls small.
+        
+        Args:
+            table_name: Name of the table
+            columns: List of column dicts with 'name' and 'type'
+            table_comment: Existing table comment (if any)
+            
+        Returns:
+            Dict with 'table_description' and 'column_descriptions'
+        """
+        # Limit columns to avoid huge prompts (prioritize key columns)
+        key_columns = []
+        other_columns = []
+        for col in columns:
+            name_lower = col['name'].lower()
+            # Prioritize IDs, dates, amounts, status fields
+            if any(kw in name_lower for kw in ['_id', 'id_', 'date', 'time', 'amount', 'price', 'status', 'type', 'name', 'count']):
+                key_columns.append(col)
+            else:
+                other_columns.append(col)
+        
+        # Take up to 20 key columns + fill with others up to 30 total
+        selected_columns = key_columns[:20] + other_columns[:max(0, 30 - len(key_columns))]
+        
+        columns_info = "\n".join([
+            f"  - {col['name']} ({col['type']})"
+            for col in selected_columns
+        ])
+        
+        truncation_note = ""
+        if len(columns) > len(selected_columns):
+            truncation_note = f"\n(Showing {len(selected_columns)} of {len(columns)} columns - key columns prioritized)"
+        
+        prompt = f"""You are a data analyst writing semantic descriptions.
+
+TABLE: {table_name}
+EXISTING COMMENT: {table_comment or 'None'}
+
+COLUMNS:{truncation_note}
+{columns_info}
+
+BUSINESS CONTEXT:
+{self.business_context}
+
+TASK:
+Generate a JSON object with:
+1. table_description: Clear business description of what this table contains (1-2 sentences)
+2. column_descriptions: Object mapping column names to business descriptions (1 sentence each)
+
+Format:
+{{
+  "table_description": "What this table contains and its business purpose",
+  "column_descriptions": {{
+    "column_name": "What this column represents"
+  }}
+}}
+
+CRITICAL: Return ONLY a JSON object. No explanations. Start with {{ and end with }}.
+Keep descriptions concise and business-focused.
+"""
+        
+        response = self.llm.invoke(prompt)
+        result = self._parse_json_response(response.content, expected_type=dict)
+        
+        # Prefix column descriptions with table name for the final merge
+        prefixed_columns = {
+            f"{table_name}.{col_name}": desc
+            for col_name, desc in result.get('column_descriptions', {}).items()
+        }
+        
+        return {
+            'table_description': result.get('table_description', ''),
+            'column_descriptions': prefixed_columns
+        }
     
     def generate_sample_questions(self, dimensions: List[Dict], measures: List[Dict], joins: List[Dict]) -> List[Dict[str, str]]:
         """
