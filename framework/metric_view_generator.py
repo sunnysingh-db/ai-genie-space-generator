@@ -342,30 +342,88 @@ class MetricViewGenerator:
             except Exception as e:
                 error_msg = str(e).lower()
                 
-                # Handle unresolved column errors: remove offending measures/dimensions and retry
+                # Handle unresolved column errors: remove offending measures/dimensions/joins and retry
                 if 'unresolved_column' in error_msg or 'cannot be resolved' in error_msg or 'field_not_found' in error_msg or 'no such struct field' in error_msg:
-                    # Extract the bad column name from error
-                    bad_col_match = re.search(r'(?:with name|struct field) `([^`]+)`', str(e))
-                    if bad_col_match and attempt < max_attempts:
-                        bad_col = bad_col_match.group(1)
-                        # Handle dotted references like bookings.booking_date
-                        bad_col_parts = bad_col.split('.')
-                        bad_col_simple = bad_col_parts[-1]
-                        
+                    # Extract bad column - handle both `col` and `table`.`col` patterns
+                    error_str = str(e)
+                    # Try dot-qualified pattern first: `table`.`column`
+                    bad_col_match = re.search(r'with name `([^`]+)`\.`([^`]+)`', error_str)
+                    if bad_col_match:
+                        bad_table_ref = bad_col_match.group(1)
+                        bad_col_simple = bad_col_match.group(2)
+                    else:
+                        # Fallback: single backtick pattern
+                        bad_col_match = re.search(r'(?:with name|struct field) `([^`]+)`', error_str)
+                        if bad_col_match:
+                            bad_col = bad_col_match.group(1)
+                            bad_col_parts = bad_col.split('.')
+                            bad_col_simple = bad_col_parts[-1]
+                            bad_table_ref = bad_col_parts[0] if len(bad_col_parts) > 1 else None
+                        else:
+                            bad_col_simple = None
+                            bad_table_ref = None
+                    
+                    if bad_col_simple and attempt < max_attempts:
                         orig_metric_count = len(metrics)
                         orig_dim_count = len(dimensions)
+                        orig_join_count = len(joins)
                         
                         # Remove measures containing the bad column reference
                         metrics = [m for m in metrics if bad_col_simple not in m.get('formula', '')]
                         # Remove dimensions containing the bad column reference
                         dimensions = [d for d in dimensions if bad_col_simple not in d.get('column', '') and bad_col_simple not in d.get('name', '')]
+                        # Remove joins whose condition references the bad column
+                        joins = [j for j in joins if bad_col_simple not in j.get('condition', '')]
                         
                         removed_metrics = orig_metric_count - len(metrics)
                         removed_dims = orig_dim_count - len(dimensions)
+                        removed_joins = orig_join_count - len(joins)
                         
-                        if removed_metrics > 0 or removed_dims > 0:
-                            print(f"  \u26a0\ufe0f  Removed {removed_metrics} measures and {removed_dims} dimensions referencing invalid column '{bad_col_simple}', retrying...")
-                            # Rebuild YAML with filtered measures/dimensions
+                        if removed_metrics > 0 or removed_dims > 0 or removed_joins > 0:
+                            parts = []
+                            if removed_metrics > 0:
+                                parts.append(f"{removed_metrics} measures")
+                            if removed_dims > 0:
+                                parts.append(f"{removed_dims} dimensions")
+                            if removed_joins > 0:
+                                parts.append(f"{removed_joins} joins")
+                            print(f"  \u26a0\ufe0f  Removed {', '.join(parts)} referencing invalid column '{bad_col_simple}'"
+                                  f"{f' on {bad_table_ref}' if bad_table_ref else ''}, retrying...")
+                            # Rebuild YAML with filtered measures/dimensions/joins
+                            yaml_content = self._build_metric_view_yaml(
+                                base_table=base_table,
+                                metrics=metrics,
+                                dimensions=dimensions,
+                                joins=joins,
+                                config=config
+                            )
+                            continue
+                
+                # Handle TABLE_OR_VIEW_NOT_FOUND: remove joins/measures referencing the missing table and retry
+                if 'table_or_view_not_found' in error_msg or ('cannot be found' in error_msg and 'verify the spelling' in error_msg):
+                    # Extract the missing table/view name
+                    missing_table_match = re.search(r'table or view `([^`]+)`', str(e))
+                    if missing_table_match and attempt < max_attempts:
+                        missing_table = missing_table_match.group(1)
+                        
+                        orig_join_count = len(joins)
+                        orig_metric_count = len(metrics)
+                        
+                        # Remove joins referencing the missing table
+                        joins = [j for j in joins if j.get('left_table') != missing_table and j.get('right_table') != missing_table and missing_table not in j.get('condition', '')]
+                        # Remove measures whose formulas reference the missing table
+                        metrics = [m for m in metrics if missing_table not in m.get('formula', '')]
+                        
+                        removed_joins = orig_join_count - len(joins)
+                        removed_metrics = orig_metric_count - len(metrics)
+                        
+                        if removed_joins > 0 or removed_metrics > 0:
+                            parts = []
+                            if removed_joins > 0:
+                                parts.append(f"{removed_joins} joins")
+                            if removed_metrics > 0:
+                                parts.append(f"{removed_metrics} measures")
+                            print(f"  \u26a0\ufe0f  Removed {', '.join(parts)} referencing missing table '{missing_table}', retrying...")
                             yaml_content = self._build_metric_view_yaml(
                                 base_table=base_table,
                                 metrics=metrics,
@@ -421,6 +479,24 @@ class MetricViewGenerator:
                             metrics = [m for m in metrics if m['name'] not in bad_measure_names]
                             removed = orig_count - len(metrics)
                             print(f"  \u26a0\ufe0f  Removed {removed} measures with nested aggregates ({', '.join(bad_measure_names)}), retrying...")
+                            yaml_content = self._build_metric_view_yaml(
+                                base_table=base_table,
+                                metrics=metrics,
+                                dimensions=dimensions,
+                                joins=joins,
+                                config=config
+                            )
+                            continue
+                
+                # Handle METRIC_VIEW_WINDOW_FUNCTION_NOT_SUPPORTED: remove measures with window functions
+                if 'window_function_not_supported' in error_msg or 'window function' in error_msg:
+                    if attempt < max_attempts:
+                        orig_count = len(metrics)
+                        # Remove measures whose formulas contain window function patterns (OVER clause)
+                        metrics = [m for m in metrics if 'OVER' not in m.get('formula', '').upper() and 'OVER(' not in m.get('formula', '').upper()]
+                        removed = orig_count - len(metrics)
+                        if removed > 0:
+                            print(f"  \u26a0\ufe0f  Removed {removed} measures with unsupported window functions, retrying...")
                             yaml_content = self._build_metric_view_yaml(
                                 base_table=base_table,
                                 metrics=metrics,

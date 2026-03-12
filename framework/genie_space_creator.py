@@ -64,15 +64,60 @@ class GenieSpaceCreator:
         # --- Description ---
         description = genie_description if genie_description else f"Analytics space for {self.full_schema}"
         
-        # --- Table identifiers ---
-        table_identifiers = []
-        for table in config.get('relevant_tables', []):
-            table_identifiers.append(f"{self.full_schema}.{table}")
-        if metric_views:
-            for view_name in metric_views:
-                table_identifiers.append(f"{self.full_schema}.{view_name}")
-        table_identifiers = sorted(table_identifiers)
+        # --- Table identifiers (metric-view-first strategy for Genie Space limit) ---
+        GENIE_SPACE_MAX_ITEMS = 30  # API hard limit for tables + metric_views
         
+        # Build fully-qualified metric view identifiers
+        metric_view_ids = [f"{self.full_schema}.{mv}" for mv in (metric_views or [])]
+        
+        # Build fully-qualified raw table identifiers
+        raw_table_ids = [f"{self.full_schema}.{t}" for t in config.get('relevant_tables', [])]
+        
+        # --- PRIORITY: ALL metric views come first, tables fill remaining slots ---
+        if len(metric_view_ids) >= GENIE_SPACE_MAX_ITEMS:
+            # More metric views than the limit - smart-rank and pick top 30, 0 tables
+            metric_view_ids = self._rank_metric_views(
+                metric_view_ids, config, GENIE_SPACE_MAX_ITEMS
+            )
+            selected_tables = []
+            print(f"   \u26a0\ufe0f  {len(metric_views or [])} metric views exceed Genie Space limit of {GENIE_SPACE_MAX_ITEMS}. "
+                  f"Selected top {len(metric_view_ids)} metric views by measure count & join connectivity (0 raw tables).")
+        else:
+            # All metric views fit - fill remaining slots with raw tables
+            remaining_slots = GENIE_SPACE_MAX_ITEMS - len(metric_view_ids)
+            
+            # Identify tables NOT already covered by a metric view (uncovered = higher priority)
+            covered_tables = set()
+            for mv in (metric_views or []):
+                base = re.sub(r'^metrics_', '', mv)
+                base = re.sub(r'_v\d+$', '', base)
+                covered_tables.add(base)
+            
+            uncovered = [t for t in raw_table_ids if t.split('.')[-1] not in covered_tables]
+            covered = [t for t in raw_table_ids if t.split('.')[-1] in covered_tables]
+            
+            # Score raw tables by join connectivity for tiebreaking
+            join_tables = {j.get('left_table') for j in config.get('joins', [])} | \
+                          {j.get('right_table') for j in config.get('joins', [])}
+            
+            # Uncovered tables first (they add unique data), then covered tables
+            uncovered_ranked = sorted(uncovered, key=lambda t: (t.split('.')[-1] in join_tables,), reverse=True)
+            covered_ranked = sorted(covered, key=lambda t: (t.split('.')[-1] in join_tables,), reverse=True)
+            candidate_tables = uncovered_ranked + covered_ranked
+            
+            selected_tables = candidate_tables[:remaining_slots]
+            
+            total_original = len(metric_view_ids) + len(raw_table_ids)
+            total_selected = len(metric_view_ids) + len(selected_tables)
+            if total_original > GENIE_SPACE_MAX_ITEMS:
+                pruned = total_original - total_selected
+                print(f"   \u26a0\ufe0f  Genie Space limit is {GENIE_SPACE_MAX_ITEMS} items. "
+                      f"Pruned {pruned} lower-priority tables "
+                      f"(kept {len(metric_view_ids)} metric views + {len(selected_tables)} tables).")
+        
+        table_identifiers = sorted(metric_view_ids + selected_tables)
+        print(f"   Built Genie Space with {len(metric_view_ids)} metric views + {len(selected_tables)} tables = {len(table_identifiers)} items")
+
         # --- Build serialized space ---
         serialized_space = self._build_serialized_space(
             config=config,
@@ -129,6 +174,50 @@ class GenieSpaceCreator:
                 'table_identifiers': table_identifiers,
                 'instructions': self._build_instructions_text(config, business_context)
             }
+    
+    def _rank_metric_views(
+        self,
+        metric_view_ids: list,
+        config: dict,
+        max_items: int
+    ) -> list:
+        """
+        Rank metric views by richness and pick the top max_items.
+        
+        Scoring:
+          1. Number of measures assigned to the base table (primary signal)
+          2. Join connectivity — how many joins reference the base table (tiebreaker)
+        """
+        import re as _re
+        
+        # Count measures per table
+        measures_by_table = {}
+        for m in config.get('measures', config.get('metrics', [])):
+            table = m.get('table', '')
+            if table:
+                measures_by_table[table] = measures_by_table.get(table, 0) + 1
+        
+        # Count joins per table
+        joins_by_table = {}
+        for j in config.get('joins', []):
+            for side in ('left_table', 'right_table'):
+                t = j.get(side, '')
+                if t:
+                    joins_by_table[t] = joins_by_table.get(t, 0) + 1
+        
+        def _score(mv_id: str) -> tuple:
+            """Higher score = more valuable metric view."""
+            mv_name = mv_id.split('.')[-1]
+            # Derive base table from metric view name: metrics_<table> or metrics_<table>_vN
+            base = _re.sub(r'^metrics_', '', mv_name)
+            base = _re.sub(r'_v\d+$', '', base)
+            return (
+                measures_by_table.get(base, 0),   # primary: more measures = richer
+                joins_by_table.get(base, 0),       # secondary: more joins = more connected
+            )
+        
+        ranked = sorted(metric_view_ids, key=_score, reverse=True)
+        return ranked[:max_items]
     
     def _build_serialized_space(
         self, 

@@ -224,21 +224,22 @@ class LLMOrchestrator:
     
     def filter_relevant_tables(self, metadata: Dict[str, Any]) -> List[str]:
         """
-        Step 1: Filter and select 5-10 most relevant tables based on business context.
+        Step 1: Filter and select the most relevant tables based on business context.
+        No hard cap — all relevant tables proceed to metric view generation.
+        The Genie Space creation step handles the 30-item API limit downstream.
         
         Args:
             metadata: Full metadata from all tables
             
         Returns:
             List of relevant table names
-        
         """
         tables_info = "\n".join([
             f"  - {t['table_name']}: {t.get('comment', 'No description')} (Columns: {self._get_column_count(t['table_name'], metadata)})"
             for t in metadata['tables']
         ])
         
-        prompt = f"""You are a data analyst. Select 5-10 most relevant tables for the following business context.
+        prompt = f"""You are a data analyst. Select the most relevant tables for the following business context.
 
 BUSINESS CONTEXT:
 {self.business_context}
@@ -247,8 +248,10 @@ AVAILABLE TABLES:
 {tables_info}
 
 TASK:
-Return a JSON array of the 5-10 most relevant table names for this business context.
+Return a JSON array of the most relevant table names for this business context.
 Consider which tables are needed to answer the sample business questions above.
+Include all tables that are directly relevant to the business domain — every selected
+table will get its own metric view with measures, dimensions and joins.
 
 CRITICAL: Your response must be ONLY a JSON array of strings. No explanations, no markdown.
 Example format: ["table1", "table2", "table3"]
@@ -619,12 +622,24 @@ ALWAYS use table_name.column_name in formulas (e.g. SUM(orders.total_amount), no
     def _generate_joins_only(self, metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
         Generate join definitions only (lightweight LLM call).
-        No column descriptions - just table relationships.
+        Includes actual column names per table to prevent hallucinated join columns.
         """
-        tables_info = "\n".join([
-            f"  - {t['table_name']}: {t.get('comment', 'No description')}"
-            for t in metadata['tables']
-        ])
+        # Build table info WITH column names so LLM only uses real columns
+        columns_by_table = {}
+        for col in metadata['columns']:
+            table = col['table_name']
+            if table not in columns_by_table:
+                columns_by_table[table] = []
+            columns_by_table[table].append(col['column_name'])
+        
+        tables_info_parts = []
+        for t in metadata['tables']:
+            tname = t['table_name']
+            comment = t.get('comment', 'No description')
+            cols = columns_by_table.get(tname, [])
+            cols_str = ", ".join(cols) if cols else "No columns"
+            tables_info_parts.append(f"  - {tname}: {comment}\n    Columns: [{cols_str}]")
+        tables_info = "\n".join(tables_info_parts)
         
         # Format detected relationships
         relationships_info = "\n".join([
@@ -637,7 +652,7 @@ ALWAYS use table_name.column_name in formulas (e.g. SUM(orders.total_amount), no
 BUSINESS CONTEXT:
 {self.business_context}
 
-TABLES:
+TABLES (with their actual columns):
 {tables_info}
 
 DETECTED RELATIONSHIPS (FK hints):
@@ -661,7 +676,10 @@ Format:
   }}
 ]
 
-CRITICAL: Return ONLY a JSON array. No explanations. Start with [ and end with ].
+CRITICAL RULES:
+- Return ONLY a JSON array. No explanations. Start with [ and end with ].
+- ONLY use column names that actually exist in the Columns list for each table above.
+- NEVER invent or assume column names that are not listed. If no valid join column exists between two tables, do NOT create a join for them.
 """
         
         response = self.llm.invoke(prompt)

@@ -5,11 +5,11 @@
 # ============================================================
 
 # ── Data Location ──────────────────────────────────────────────────────
-catalog: system
-schema: workflow
+catalog: sunny_uc
+schema: demo
 
 # ── Genie Space ────────────────────────────────────────────────────────
-genie_space_name: "Workflow & Job Run Analytics"
+genie_space_name: "Aviation Bookings & Operations Analytics"
 
 # ── AI Model ───────────────────────────────────────────────────────────
 # Options: databricks-claude-opus-4-6, databricks-meta-llama-3-1-405b-instruct
@@ -17,34 +17,46 @@ llm_model: databricks-claude-sonnet-4-6
 
 # ── Table Filtering ────────────────────────────────────────────────────
 exclude_table_patterns:
+  - "_quality_monitoring%"
+  - "abac_data"
+  - "agent_%"
+  - "dashboard_%"
+  - "df_fs"
+  - "dummy_data"
+  - "features"
+  - "fin-agent%"
+  - "food_langraph%"
+  - "car_features"
+  - "contract_metadata"
+  - "delivery_drivers"
 
 # ============================================================
 # Business Context (auto-generated from schema analysis)
 # ============================================================
 
 # Q1: What does your business do?
-business_domain: "Databricks platform operations tracking automated workflow jobs across multiple workspaces, monitoring scheduled and triggered job executions, task performance, and run outcomes."
+business_domain: "Commercial airline operations managing flight schedules, passenger bookings, and airport networks across a global route system with multiple airline partners and cabin classes."
 
 # Q2: What data is tracked in these tables?
-data_description: "Automated job configurations with scheduling details, run history showing success and failure outcomes, individual task-level execution breakdowns with timing phases, and full change history of job and task setups over time."
+data_description: "Passenger booking records with fare breakdowns, cabin class, and ancillary purchases; flight schedules with delay tracking, occupancy rates, and aircraft details; airline profiles including fleet size and alliance membership; and airport information with gate counts and geographic coordinates."
 
 # Q3: Who uses this data and what decisions do they make?
-stakeholders_and_decisions: "Platform engineers monitor job reliability and failure rates; operations teams track execution durations and queue times; workspace admins review job configurations and ownership across teams."
+stakeholders_and_decisions: "Revenue managers analyse fare trends and cabin class mix; operations teams monitor flight delays, occupancy, and route performance; network planners evaluate airport connectivity and airline partnerships; customer experience teams review booking channels and ancillary uptake."
 
 # Q4: Any other important context? (optional)
-additional_context: "Data covers late 2025 to early 2026. Job trigger types include scheduled, continuous, file arrival, and table updates. Run outcomes include Succeeded, Failed, Error, Cancelled, and Timed Out. Job runs link to individual tasks, compute resources, and configuration history."
+additional_context: "Flight data spans September 2025 to February 2026. Bookings from July 2025 to February 2026. Cabin classes include Economy, Business, First, and Premium Economy. Booking channels cover Mobile App, Website, Call Center, Travel Agent, and Airport Kiosk. Fifteen airlines across twenty airports."
 
 # ============================================================
 # Sample Questions (auto-generated)
 # ============================================================
 sample_questions:
-  - "Which jobs have the highest failure rate over the past 30 days?"
-  - "How has the average job run duration changed week over week?"
-  - "What are the most common reasons jobs are failing or being terminated?"
-  - "Which workspaces have the most job runs, and how do their success rates compare?"
-  - "How much time are jobs spending waiting in the queue before they start running?"
-  - "Which scheduled jobs are taking the longest to complete end to end?"
-  - "How many jobs are triggered automatically versus run on demand?"
-  - "Which tasks within jobs are failing most frequently and causing overall job failures?"
-  - "Are there any jobs that consistently time out, and how long do they typically run before stopping?"
-  - "How many jobs were created or modified in the last 90 days, and who made those changes?"
+  - "What is the total revenue from bookings broken down by cabin class?"
+  - "Which airlines have the highest average flight delay in minutes?"
+  - "How does the occupancy rate trend month over month across all flights?"
+  - "What are the top five busiest routes by total passenger count?"
+  - "Which booking channel generates the most revenue?"
+  - "How do average fares compare between Economy and Business class over time?"
+  - "Which airports have the most delayed departures?"
+  - "What percentage of bookings include checked bags, meals, or Wi-Fi purchases?"
+  - "Which airline alliances contribute the most flights in our network?"
+  - "What is the cancellation rate of bookings by payment method?"

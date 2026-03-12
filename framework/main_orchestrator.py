@@ -96,6 +96,21 @@ class GenieSpaceFramework:
             metric_views_result = view_generator.create_metric_views(llm_config)
             result['metric_views'] = metric_views_result
             
+            # Pre-Step 4: Check Genie Space item limit
+            GENIE_SPACE_MAX = 30
+            n_relevant = len(llm_config.get('relevant_tables', []))
+            n_mv = len(metric_views_result.get('views', []))
+            total_items = n_relevant + n_mv
+            if total_items > GENIE_SPACE_MAX:
+                if n_mv >= GENIE_SPACE_MAX:
+                    print(f"\n\u26a0\ufe0f  {n_mv} metric views alone exceed Genie Space limit of {GENIE_SPACE_MAX}. "
+                          f"Top {GENIE_SPACE_MAX} metric views will be selected by measure richness (0 raw tables).")
+                else:
+                    remaining = GENIE_SPACE_MAX - n_mv
+                    print(f"\n\u26a0\ufe0f  Total items ({n_relevant} tables + {n_mv} metric views = {total_items}) "
+                          f"exceeds Genie Space limit of {GENIE_SPACE_MAX}. "
+                          f"All {n_mv} metric views will be kept; {remaining} table slots available for raw tables.")
+            
             # Step 4: Create Genie Space
             print("\n" + "=" * 80)
             print("STEP 4: CREATING GENIE SPACE")
