@@ -1,7 +1,8 @@
 """
-Metadata Scanner Module (Enhanced with Parallel Processing)
-Scans Unity Catalog information_schema for table metadata, samples data in parallel,
-and infers relationships between tables.
+Metadata Scanner Module (Enhanced with Table List Support)
+Accepts a list of fully qualified table names (catalog.schema.table),
+scans their metadata, samples data in parallel, and infers relationships.
+Supports tables spanning multiple catalogs and schemas.
 """
 
 from pyspark.sql import SparkSession
@@ -10,249 +11,308 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 import time
 
-# Suppress pyspark connect session warnings
 import logging
 logging.getLogger("pyspark.sql.connect.logging").setLevel(logging.ERROR)
 
+
 class MetadataScanner:
-    """Scans schema metadata and infers table relationships with parallel processing."""
-    
-    def __init__(self, spark: SparkSession, catalog: str, schema: str, exclude_table_patterns: List[str] = None):
+    """Scans metadata for a list of tables and infers relationships."""
+
+    def __init__(self, spark: SparkSession, table_list: List[str] = None,
+                 catalog: str = None, schema: str = None,
+                 exclude_table_patterns: List[str] = None,
+                 table_fq_map: Dict[str, str] = None):
         """
         Initialize metadata scanner.
-        
+
         Args:
             spark: Active SparkSession
-            catalog: Catalog name
-            schema: Schema name
-            exclude_table_patterns: List of SQL LIKE patterns to exclude tables (e.g., ['%_logs%', 'monitor_%'])
-                                   Empty list or None scans all tables
+            table_list: List of fully qualified table names (catalog.schema.table).
+                        Primary input — when provided, catalog/schema/exclude_patterns are ignored.
+            catalog: (Legacy) Catalog name — used only if table_list is not provided
+            schema: (Legacy) Schema name — used only if table_list is not provided
+            exclude_table_patterns: (Legacy) Patterns to exclude — ignored when table_list is provided
+            table_fq_map: Pre-built short_name->fq_name mapping (optional, built internally if not provided)
         """
         self.spark = spark
-        self.catalog = catalog
-        self.schema = schema
-        self.full_schema = f"{catalog}.{schema}"
-        self.exclude_patterns = exclude_table_patterns if exclude_table_patterns else []
-        
-        # Pre-compute backtick-quoted identifiers for SQL contexts
-        self.quoted_catalog = self._quote_identifier(catalog)
-        self.quoted_schema = self._quote_identifier(schema)
-        self.quoted_full_schema = f"{self.quoted_catalog}.{self.quoted_schema}"
-    
-    def _quote_identifier(self, identifier: str) -> str:
-        """
-        Quote identifier if it contains characters that require backticks.
-        
-        Args:
-            identifier: Table or column name
-            
-        Returns:
-            Backticked identifier if needed, otherwise unchanged
-        """
-        # Check if identifier contains invalid characters (hyphens, spaces, etc.)
-        # Valid unquoted identifiers: alphanumeric + underscore, not starting with digit
-        if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', identifier):
-            # Valid identifier, no backticks needed
-            return identifier
+
+        if table_list:
+            # ── New mode: explicit table list ──
+            self.table_list = table_list
+            self.parsed_tables = []
+            for fq in table_list:
+                parts = fq.split('.')
+                if len(parts) != 3:
+                    raise ValueError(f"Table must be fully qualified (catalog.schema.table): {fq}")
+                self.parsed_tables.append({
+                    'catalog': parts[0], 'schema': parts[1],
+                    'table': parts[2], 'fq_name': fq
+                })
+
+            # Build or accept the short_name -> fq_name map
+            if table_fq_map:
+                self.table_fq_map = table_fq_map
+            else:
+                self.table_fq_map = self._build_fq_map()
+
+            # For display purposes, use first table's catalog.schema
+            self.catalog = self.parsed_tables[0]['catalog']
+            self.schema = self.parsed_tables[0]['schema']
+            self.full_schema = f"{self.catalog}.{self.schema}"
+            self.exclude_patterns = []
         else:
-            # Invalid identifier, wrap in backticks
-            return f"`{identifier}`"
-    
+            # ── Legacy mode: scan full schema ──
+            self.table_list = None
+            self.parsed_tables = None
+            self.table_fq_map = {}
+            self.catalog = catalog
+            self.schema = schema
+            self.full_schema = f"{catalog}.{schema}"
+            self.exclude_patterns = exclude_table_patterns or []
+
+        self.quoted_catalog = self._quote_identifier(self.catalog)
+        self.quoted_schema = self._quote_identifier(self.schema)
+        self.quoted_full_schema = f"{self.quoted_catalog}.{self.quoted_schema}"
+
+    def _build_fq_map(self) -> Dict[str, str]:
+        """Build short_name -> fq_name mapping, handling collisions."""
+        short_counts = {}
+        for pt in self.parsed_tables:
+            short_counts[pt['table']] = short_counts.get(pt['table'], 0) + 1
+
+        collisions = {s for s, c in short_counts.items() if c > 1}
+
+        fq_map = {}
+        for pt in self.parsed_tables:
+            short = pt['table']
+            if short in collisions:
+                short = f"{pt['schema']}_{pt['table']}"
+            fq_map[short] = pt['fq_name']
+
+        return fq_map
+
+    def _quote_identifier(self, identifier: str) -> str:
+        if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', identifier):
+            return identifier
+        return f"`{identifier}`"
+
     def scan(self) -> Dict[str, Any]:
-        """
-        Perform complete metadata scan including tables, columns, samples, and relationships.
-        
-        Returns:
-            Dictionary containing:
-                - tables: List of table metadata
-                - columns: List of column metadata
-                - samples: Dictionary of table samples
-                - relationships: Inferred FK relationships
-        """
-        print(f"🔍 Scanning metadata for {self.full_schema}...")
-        
+        """Perform complete metadata scan."""
+        if self.table_list:
+            print(f"Scanning metadata for {len(self.table_list)} specified tables...")
+        else:
+            print(f"Scanning metadata for {self.full_schema}...")
+
         tables = self._get_tables()
         columns = self._get_columns()
         samples = self._sample_tables(tables)
         relationships = self._infer_relationships(columns, samples)
-        
+
         result = {
             'tables': tables,
             'columns': columns,
             'samples': samples,
             'relationships': relationships
         }
-        
-        print(f"✅ Scan complete: {len(tables)} tables, {len(columns)} columns, {len(relationships)} relationships")
+
+        print(f"Scan complete: {len(tables)} tables, {len(columns)} columns, {len(relationships)} relationships")
         return result
-    
+
     def _get_tables(self) -> List[Dict[str, Any]]:
-        """
-        Query information_schema.tables for table metadata.
-        Supports scanning 100+ tables without limits.
-        Applies configurable exclusion patterns.
-        Cross-validates against SHOW TABLES to exclude phantom/stale entries.
-        """
-        # Build WHERE clause with dynamic exclusion patterns
-        where_clauses = [
-            f"table_schema = '{self.schema}'",
-            "table_type = 'MANAGED'"
-        ]
-        
-        # Add NOT LIKE clauses for each exclusion pattern
-        for pattern in self.exclude_patterns:
-            where_clauses.append(f"table_name NOT LIKE '{pattern}'")
-        
-        where_clause = " AND ".join(where_clauses)
-        
-        query = f"""
-            SELECT 
-                table_catalog,
-                table_schema,
-                table_name,
-                table_type,
-                comment
-            FROM {self.quoted_catalog}.information_schema.tables
-            WHERE {where_clause}
-            ORDER BY table_name
-        """
-        
-        print(f"  📊 Querying tables in {self.full_schema}...")
-        if self.exclude_patterns:
-            print(f"  🔍 Excluding patterns: {', '.join(self.exclude_patterns)}")
+        """Get table metadata for the specified tables or full schema."""
+        if self.table_list:
+            return self._get_tables_from_list()
         else:
-            print(f"  🔍 Scanning ALL tables (no exclusions)")
-        
-        df = self.spark.sql(query)
-        tables = [row.asDict() for row in df.collect()]
-        info_schema_count = len(tables)
-        print(f"  📋 information_schema reports {info_schema_count} tables")
-        
-        # Cross-validate with SHOW TABLES to filter out phantom/stale entries
-        # that appear in information_schema but are not actually queryable
-        show_df = self.spark.sql(
-            f"SHOW TABLES IN {self.quoted_catalog}.{self.quoted_schema}"
-        )
-        existing_names = {row.tableName for row in show_df.collect()}
-        
-        tables = [t for t in tables if t['table_name'] in existing_names]
-        # Store validated names for use by _get_columns()
+            return self._get_tables_from_schema()
+
+    def _get_tables_from_list(self) -> List[Dict[str, Any]]:
+        """Get table metadata for specific tables in table_list."""
+        print(f"  Querying metadata for {len(self.parsed_tables)} tables...")
+
+        # Group by catalog.schema for efficient queries
+        schema_groups = {}
+        for pt in self.parsed_tables:
+            key = (pt['catalog'], pt['schema'])
+            schema_groups.setdefault(key, []).append(pt['table'])
+
+        tables = []
+        for (cat, sch), table_names in schema_groups.items():
+            qcat = self._quote_identifier(cat)
+            names_sql = ', '.join(f"\'{t}\'" for t in table_names)
+
+            try:
+                info_df = self.spark.sql(f"""
+                    SELECT table_name, table_type, comment
+                    FROM {qcat}.information_schema.tables
+                    WHERE table_schema = '{sch}'
+                      AND table_name IN ({names_sql})
+                """)
+                info_lookup = {row.table_name: row.asDict() for row in info_df.collect()}
+            except Exception:
+                info_lookup = {}
+
+            for tname in table_names:
+                info = info_lookup.get(tname, {})
+                table_type = info.get('table_type', 'UNKNOWN')
+                if table_type == 'METRIC_VIEW':
+                    continue
+                tables.append({
+                    'table_catalog': cat,
+                    'table_schema': sch,
+                    'table_name': tname,
+                    'table_type': table_type,
+                    'comment': info.get('comment', None)
+                })
+
         self._validated_table_names = {t['table_name'] for t in tables}
-        
-        filtered_count = info_schema_count - len(tables)
-        if filtered_count > 0:
-            print(f"  🧹 Filtered out {filtered_count} phantom table(s) not returned by SHOW TABLES")
-        
-        # Enhanced logging
-        table_count = len(tables)
-        print(f"  ✅ Found {table_count} validated tables")
-        
-        if table_count == 0:
-            print(f"  ⚠️  Warning: No tables found in {self.full_schema}")
-        elif table_count > 50:
-            print(f"  📈 Large schema detected: {table_count} tables will be scanned")
-        
+        print(f"  Found {len(tables)} validated tables")
         return tables
-    
+
+    def _get_tables_from_schema(self) -> List[Dict[str, Any]]:
+        """Legacy: scan full schema for tables."""
+        print(f"  Querying tables in {self.full_schema}...")
+        show_df = self.spark.sql(f"SHOW TABLES IN {self.quoted_full_schema}")
+        show_tables = [row.tableName for row in show_df.collect()]
+
+        info_query = f"""
+            SELECT table_name, table_type, comment
+            FROM {self.quoted_catalog}.information_schema.tables
+            WHERE table_schema = '{self.schema}'
+        """
+        info_df = self.spark.sql(info_query)
+        info_lookup = {row.table_name: row.asDict() for row in info_df.collect()}
+
+        if self.exclude_patterns:
+            compiled_patterns = []
+            for pattern in self.exclude_patterns:
+                regex_str = pattern.replace('%', '.*').replace('_', '.')
+                compiled_patterns.append(re.compile(regex_str, re.IGNORECASE))
+            show_tables = [
+                t for t in show_tables
+                if not any(p.fullmatch(t) for p in compiled_patterns)
+            ]
+
+        tables = []
+        for table_name in show_tables:
+            info = info_lookup.get(table_name, {})
+            table_type = info.get('table_type', 'UNKNOWN')
+            if table_type == 'METRIC_VIEW':
+                continue
+            tables.append({
+                'table_catalog': self.catalog,
+                'table_schema': self.schema,
+                'table_name': table_name,
+                'table_type': table_type,
+                'comment': info.get('comment', None)
+            })
+
+        self._validated_table_names = {t['table_name'] for t in tables}
+        print(f"  Found {len(tables)} validated tables")
+        return tables
+
     def _get_columns(self) -> List[Dict[str, Any]]:
-        """Query information_schema.columns for column metadata.
-        Filters to only include columns from validated tables."""
+        """Query columns for validated tables."""
+        if self.table_list:
+            return self._get_columns_from_list()
+        else:
+            return self._get_columns_from_schema()
+
+    def _get_columns_from_list(self) -> List[Dict[str, Any]]:
+        """Get columns for specific tables, grouped by catalog.schema."""
+        schema_groups = {}
+        for pt in self.parsed_tables:
+            if pt['table'] in self._validated_table_names:
+                key = (pt['catalog'], pt['schema'])
+                schema_groups.setdefault(key, []).append(pt['table'])
+
+        all_columns = []
+        for (cat, sch), table_names in schema_groups.items():
+            qcat = self._quote_identifier(cat)
+            names_sql = ', '.join(f"\'{t}\'" for t in table_names)
+            try:
+                df = self.spark.sql(f"""
+                    SELECT table_catalog, table_schema, table_name, column_name,
+                           ordinal_position, data_type, is_nullable, column_default, comment
+                    FROM {qcat}.information_schema.columns
+                    WHERE table_schema = '{sch}'
+                      AND table_name IN ({names_sql})
+                    ORDER BY table_name, ordinal_position
+                """)
+                all_columns.extend([row.asDict() for row in df.collect()])
+            except Exception as e:
+                print(f"  Could not query columns for {cat}.{sch}: {e}")
+
+        print(f"  Found {len(all_columns)} columns across validated tables")
+        return all_columns
+
+    def _get_columns_from_schema(self) -> List[Dict[str, Any]]:
+        """Legacy: get columns from full schema."""
         query = f"""
-            SELECT 
-                table_catalog,
-                table_schema,
-                table_name,
-                column_name,
-                ordinal_position,
-                data_type,
-                is_nullable,
-                column_default,
-                comment
+            SELECT table_catalog, table_schema, table_name, column_name,
+                   ordinal_position, data_type, is_nullable, column_default, comment
             FROM {self.quoted_catalog}.information_schema.columns
             WHERE table_schema = '{self.schema}'
             ORDER BY table_name, ordinal_position
         """
-        
         df = self.spark.sql(query)
         columns = [row.asDict() for row in df.collect()]
-        total = len(columns)
-        
-        # Filter to only include columns from validated tables
-        # _validated_table_names is set by _get_tables() which runs first in scan()
+
         if hasattr(self, '_validated_table_names') and self._validated_table_names:
             columns = [c for c in columns if c['table_name'] in self._validated_table_names]
-            if len(columns) < total:
-                print(f"  🧹 Filtered columns: {total} → {len(columns)} (removed phantom table columns)")
-        
-        print(f"  📋 Found {len(columns)} columns across validated tables")
+
+        print(f"  Found {len(columns)} columns across validated tables")
         return columns
-    
+
     def _sample_tables(self, tables: List[Dict[str, Any]], limit: int = 100, max_workers: int = 10) -> Dict[str, List[Dict]]:
-        """
-        Sample data from tables in PARALLEL for faster execution.
-        
-        Args:
-            tables: List of table metadata
-            limit: Number of rows to sample per table
-            max_workers: Number of parallel workers (default: 10)
-            
-        Returns:
-            Dictionary mapping table names to sample data
-        """
+        """Sample data from tables in parallel using FQ names."""
         if not tables:
-            print(f"  ⚠️  No tables to sample")
             return {}
-        
+
         samples = {}
         total_tables = len(tables)
-        
-        print(f"  🎲 Sampling {limit} rows from {total_tables} tables...")
-        print(f"  ⚡ Using parallel processing ({max_workers} workers)")
+        print(f"  Sampling {limit} rows from {total_tables} tables...")
         start_time = time.time()
-        
-        def sample_single_table(table: Dict[str, Any]) -> tuple:
-            """Sample a single table (executed in parallel)."""
+
+        # Build FQ lookup: short_name -> quoted FQ name for sampling
+        if self.table_list:
+            fq_lookup = {}
+            for pt in self.parsed_tables:
+                fq_lookup[pt['table']] = (
+                    f"{self._quote_identifier(pt['catalog'])}."
+                    f"{self._quote_identifier(pt['schema'])}."
+                    f"{self._quote_identifier(pt['table'])}"
+                )
+        else:
+            fq_lookup = {
+                t['table_name']: f"{self.quoted_full_schema}.{self._quote_identifier(t['table_name'])}"
+                for t in tables
+            }
+
+        def sample_single_table(table):
             table_name = table['table_name']
-            # Quote table name if it contains invalid characters (hyphens, etc.)
-            quoted_table_name = self._quote_identifier(table_name)
-            full_name = f"{self.quoted_full_schema}.{quoted_table_name}"
-            
+            fq = fq_lookup.get(table_name)
+            if not fq:
+                return table_name, [], None
             try:
-                df = self.spark.table(full_name).limit(limit)
-                sample_data = [row.asDict() for row in df.collect()]
-                return table_name, sample_data, None
+                rows = self.spark.table(fq).limit(limit).collect()
+                return table_name, [row.asDict() for row in rows], None
             except Exception as e:
                 return table_name, [], str(e)
-        
-        # Execute sampling in parallel
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all sampling tasks
-            future_to_table = {executor.submit(sample_single_table, t): t for t in tables}
-            
-            # Process results as they complete
+            futures = {executor.submit(sample_single_table, t): t for t in tables}
             completed = 0
-            for future in as_completed(future_to_table):
-                table_name, sample_data, error = future.result()
-                samples[table_name] = sample_data
+            for future in as_completed(futures):
+                table_name, data, error = future.result()
                 completed += 1
-                
-                # Progress logging
                 if error:
-                    print(f"    ✗ [{completed}/{total_tables}] {table_name}: {error[:100]}")
-                else:
-                    print(f"    ✓ [{completed}/{total_tables}] {table_name}: {len(sample_data)} rows")
-        
+                    print(f"    [{completed}/{total_tables}] {table_name}: Error - {error[:80]}")
+                samples[table_name] = data
+
         elapsed = time.time() - start_time
-        tables_per_sec = total_tables / elapsed if elapsed > 0 else 0
-        print(f"  ⚡ Parallel sampling complete in {elapsed:.2f}s ({tables_per_sec:.1f} tables/sec)")
-        
-        # Summary stats
-        successful = len([s for s in samples.values() if len(s) > 0])
-        failed = total_tables - successful
-        print(f"  📊 Sampling summary: {successful} successful, {failed} failed")
-        
+        print(f"  Sampling complete ({elapsed:.1f}s)")
         return samples
-    
+
     def _infer_relationships(self, columns: List[Dict[str, Any]], samples: Dict[str, List[Dict]]) -> List[Dict[str, Any]]:
         """
         Infer foreign key relationships based on naming patterns and data overlap.

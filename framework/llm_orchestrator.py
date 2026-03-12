@@ -26,7 +26,8 @@ class LLMOrchestrator:
     ]
 
     def __init__(self, business_context: str, llm_model: str = "databricks-claude-opus-4-6",
-                 model_pool: list = None, sample_questions: list = None):
+                 model_pool: list = None, sample_questions: list = None,
+                 skip_table_filtering: bool = False):
         """
         Initialize LLM orchestrator with resilient multi-model support.
         
@@ -40,6 +41,7 @@ class LLMOrchestrator:
         self.business_context = business_context
         self.llm_model = llm_model
         self.sample_questions = sample_questions or []
+        self.skip_table_filtering = skip_table_filtering
         
         # Build sample questions text for injection into LLM prompts
         if self.sample_questions:
@@ -100,11 +102,15 @@ class LLMOrchestrator:
             # ================================================================
             # Phase 1: Filter relevant tables (sequential)
             # ================================================================
-            print("Step 1/6: Filtering relevant tables...")
             t0 = time.time()
-            relevant_tables = self.filter_relevant_tables(metadata)
+            if self.skip_table_filtering:
+                print("Step 1/6: Using all tables from table_list (no filtering)...")
+                relevant_tables = [t['table_name'] for t in metadata['tables']]
+            else:
+                print("Step 1/6: Filtering relevant tables...")
+                relevant_tables = self.filter_relevant_tables(metadata)
             step_timings['filter_tables'] = time.time() - t0
-            print(f"\u2705 Selected {len(relevant_tables)} relevant tables ({step_timings['filter_tables']:.1f}s)\n")
+            print(f"\u2705 {len(relevant_tables)} tables ready ({step_timings['filter_tables']:.1f}s)\n")
             
             # Filter metadata to only relevant tables
             filtered_metadata = self._filter_metadata(metadata, relevant_tables)
@@ -225,8 +231,7 @@ class LLMOrchestrator:
     def filter_relevant_tables(self, metadata: Dict[str, Any]) -> List[str]:
         """
         Step 1: Filter and select the most relevant tables based on business context.
-        No hard cap — all relevant tables proceed to metric view generation.
-        The Genie Space creation step handles the 30-item API limit downstream.
+        When skip_table_filtering is True (table_list mode), returns all tables directly.
         
         Args:
             metadata: Full metadata from all tables
@@ -234,6 +239,10 @@ class LLMOrchestrator:
         Returns:
             List of relevant table names
         """
+        # When table_list is provided, all tables are already user-curated — skip LLM call
+        if self.skip_table_filtering:
+            return [t['table_name'] for t in metadata['tables']]
+
         tables_info = "\n".join([
             f"  - {t['table_name']}: {t.get('comment', 'No description')} (Columns: {self._get_column_count(t['table_name'], metadata)})"
             for t in metadata['tables']
@@ -586,6 +595,15 @@ ALWAYS use table_name.column_name in formulas (e.g. SUM(orders.total_amount), no
         
         if self.llm.verbose:
             print(f"    📊 Generating semantics for {len(table_list)} tables in parallel...")
+        
+        # Defensive guard: if no tables remain after filtering, return early
+        # Prevents ThreadPoolExecutor(max_workers=0) ValueError
+        if not table_list:
+            return {
+                'joins': joins,
+                'table_descriptions': {},
+                'column_descriptions': {}
+            }
         
         with ThreadPoolExecutor(max_workers=min(3, len(table_list))) as executor:
             futures = {

@@ -13,10 +13,11 @@ import re
 class GenieSpaceCreator:
     """Creates and configures Databricks Genie spaces."""
     
-    def __init__(self, catalog: str, schema: str):
+    def __init__(self, catalog: str, schema: str, table_fq_map: dict = None):
         self.catalog = catalog
         self.schema = schema
         self.full_schema = f"{catalog}.{schema}"
+        self.table_fq_map = table_fq_map or {}
         self.workspace_client = WorkspaceClient()
     
     def create_genie_space(
@@ -71,7 +72,10 @@ class GenieSpaceCreator:
         metric_view_ids = [f"{self.full_schema}.{mv}" for mv in (metric_views or [])]
         
         # Build fully-qualified raw table identifiers
-        raw_table_ids = [f"{self.full_schema}.{t}" for t in config.get('relevant_tables', [])]
+        if self.table_fq_map:
+            raw_table_ids = [self.table_fq_map[t] for t in config.get('relevant_tables', []) if t in self.table_fq_map]
+        else:
+            raw_table_ids = [f"{self.full_schema}.{t}" for t in config.get('relevant_tables', [])]
         
         # --- PRIORITY: ALL metric views come first, tables fill remaining slots ---
         if len(metric_view_ids) >= GENIE_SPACE_MAX_ITEMS:
@@ -344,8 +348,13 @@ class GenieSpaceCreator:
                 continue
             
             # Build fully qualified identifiers
-            left_fq = f"{self.full_schema}.{left_table}" if '.' not in left_table else left_table
-            right_fq = f"{self.full_schema}.{right_table}" if '.' not in right_table else right_table
+            # Use table_fq_map for cross-schema support
+            if self.table_fq_map:
+                left_fq = self.table_fq_map.get(left_table, f"{self.full_schema}.{left_table}" if '.' not in left_table else left_table)
+                right_fq = self.table_fq_map.get(right_table, f"{self.full_schema}.{right_table}" if '.' not in right_table else right_table)
+            else:
+                left_fq = f"{self.full_schema}.{left_table}" if '.' not in left_table else left_table
+                right_fq = f"{self.full_schema}.{right_table}" if '.' not in right_table else right_table
             
             # Extract alias (last part of the table name)
             left_alias = left_table.split('.')[-1]

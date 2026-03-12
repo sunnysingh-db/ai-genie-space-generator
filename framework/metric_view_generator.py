@@ -12,25 +12,39 @@ import logging
 class MetricViewGenerator:
     """Generates UC metric views with YAML semantic layer configurations."""
     
-    def __init__(self, spark: SparkSession, catalog: str, schema: str):
+    def __init__(self, spark: SparkSession, catalog: str, schema: str,
+                 table_fq_map: dict = None):
         """
         Initialize metric view generator.
         
         Args:
             spark: Active SparkSession
-            catalog: Catalog name
-            schema: Schema name where views will be created
+            catalog: Catalog name (target schema for metric view creation)
+            schema: Schema name where metric views will be created
+            table_fq_map: Optional mapping from short table names to fully qualified names.
+                          When provided, source references use FQ names (cross-schema support).
+                          When None, falls back to catalog.schema.table_name.
         """
         self.spark = spark
         self.catalog = catalog
         self.schema = schema
         self.full_schema = f"{catalog}.{schema}"
+        self.table_fq_map = table_fq_map or {}
         
         # Pre-compute backtick-quoted identifiers for SQL contexts
         self.quoted_catalog = self._quote_identifier(catalog)
         self.quoted_schema = self._quote_identifier(schema)
         self.quoted_full_schema = f"{self.quoted_catalog}.{self.quoted_schema}"
+
     
+    def _get_fq_table_ref(self, table_name: str) -> str:
+        """Get fully qualified and quoted table reference.
+        Uses table_fq_map if available, otherwise falls back to target schema."""
+        if self.table_fq_map and table_name in self.table_fq_map:
+            fq = self.table_fq_map[table_name]
+            parts = fq.split('.')
+            return '.'.join(self._quote_identifier(p) for p in parts)
+        return f"{self.quoted_full_schema}.{self._quote_identifier(table_name)}"
     def _quote_identifier(self, identifier: str) -> str:
         """
         Quote identifier if it contains characters that require backticks.
@@ -530,8 +544,8 @@ class MetricViewGenerator:
     def _get_valid_columns(self, table_name: str) -> set:
         """Get the set of valid column names for a table."""
         try:
-            quoted_table = self._quote_identifier(table_name)
-            cols = self.spark.catalog.listColumns(f"{self.quoted_full_schema}.{quoted_table}")
+            fq_ref = self._get_fq_table_ref(table_name)
+            cols = self.spark.catalog.listColumns(fq_ref)
             return {c.name for c in cols}
         except Exception:
             return set()
@@ -593,7 +607,7 @@ class MetricViewGenerator:
         yaml_dict = {
             'version': 1.1,
             'comment': f"AI-generated metric view for {base_table}",
-            'source': f"{self.quoted_full_schema}.{quoted_base}"
+            'source': self._get_fq_table_ref(base_table)
         }
         
         # Build joins FIRST to determine reachable tables
@@ -687,10 +701,9 @@ class MetricViewGenerator:
                     continue
                 seen_join_names.add(right_table)
                 
-                quoted_right = self._quote_identifier(right_table)
                 yaml_join = {
                     'name': right_table,
-                    'source': f"{self.quoted_full_schema}.{quoted_right}",
+                    'source': self._get_fq_table_ref(right_table),
                     'on': condition
                 }
                 yaml_joins.append(yaml_join)
@@ -720,10 +733,9 @@ class MetricViewGenerator:
                     continue
                 seen_join_names.add(left_table)
                 
-                quoted_left = self._quote_identifier(left_table)
                 yaml_join = {
                     'name': left_table,
-                    'source': f"{self.quoted_full_schema}.{quoted_left}",
+                    'source': self._get_fq_table_ref(left_table),
                     'on': condition
                 }
                 yaml_joins.append(yaml_join)
