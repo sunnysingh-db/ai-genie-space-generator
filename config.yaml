@@ -25,7 +25,7 @@ catalog: system
 schema: billing
 
 # ── Genie Space ────────────────────────────────────────────────────────
-genie_space_name: "Databricks Platform Cost & Operations"
+genie_space_name: "Platform Cost & Operations Analytics"
 
 # ── AI Model ───────────────────────────────────────────────────────────
 # Options: databricks-claude-opus-4-6, databricks-meta-llama-3-1-405b-instruct
@@ -36,28 +36,28 @@ llm_model: databricks-claude-sonnet-4-6
 # ============================================================
 
 # Q1: What does your business do?
-business_domain: "Databricks platform operations covering cloud compute spending, automated job scheduling, data pipeline execution, and SQL analytics warehouse usage across multiple workspaces."
+business_domain: "Cloud data platform running jobs, pipelines, SQL warehouses, and compute clusters on Azure, tracking usage costs, resource consumption, and workload performance across multiple workspaces."
 
 # Q2: What data is tracked in these tables?
-data_description: "Cloud resource consumption and costs by product type, job and pipeline run history with success and failure outcomes, compute cluster configurations and real-time hardware utilisation, SQL warehouse activity and scaling events, and official list pricing for all platform SKUs."
+data_description: "Billing costs with historical pricing by product and unit, detailed usage consumption across all platform services, job and pipeline run histories with success and failure outcomes, compute cluster and warehouse configurations, and minute-level resource utilisation including CPU, memory, and network per machine."
 
 # Q3: Who uses this data and what decisions do they make?
-stakeholders_and_decisions: "Finance teams track spending by product and workspace; platform engineers monitor job failures and pipeline health; operations managers review compute efficiency and warehouse scaling; IT governance oversees resource ownership and tagging compliance."
+stakeholders_and_decisions: "Finance teams track spending by product and workspace; platform engineers monitor job failures and cluster efficiency; operations managers review pipeline reliability; IT leaders benchmark warehouse usage and right-size compute resources."
 
 # Q4: Any other important context? (optional)
-additional_context: "Billing data runs from 2013 to present; job and pipeline runs cover late 2025 to March 2026; warehouse events from September 2025. Costs link to compute clusters, jobs, and warehouses. Job runs connect to individual task outcomes. Pipeline updates tie back to triggering jobs."
+additional_context: "Billing pricing history runs from 2013 to late 2025. Usage and run data covers mid-2025 to early 2026. Products span jobs, pipelines, SQL warehouses, model serving, and AI services. Jobs and pipelines link to compute costs and run outcomes. Warehouses scale between 2X-Small and X-Large."
 
 # ============================================================
 # Sample Questions (auto-generated)
 # ============================================================
 sample_questions:
-  - "Which workspaces are spending the most on cloud compute, and how has that changed over the past three months?"
-  - "What percentage of automated jobs failed or were cancelled last week, and which jobs had the highest failure rate?"
-  - "Which product types — such as all-purpose compute, jobs, or SQL warehouses — are driving the most consumption costs?"
-  - "How long are our data pipelines taking to complete on average, and are any consistently running longer than expected?"
-  - "Which SQL warehouses are scaling up most frequently, and are any being left running without activity?"
-  - "Who are the top ten users or teams consuming the most compute resources this month?"
-  - "How does our spending this month compare to the same period last month, broken down by product category?"
-  - "Which clusters are showing high CPU or memory usage, and are they linked to specific jobs or teams?"
-  - "Are there any jobs that regularly queue for a long time before starting, suggesting a compute bottleneck?"
-  - "What is the estimated cost of our serverless versus standard compute usage over the last 30 days?"
+  - "Which product categories are driving the highest consumption costs this month?"
+  - "What is the total spend broken down by workspace over the last 90 days?"
+  - "Which jobs are failing most frequently and what are the most common reasons for failure?"
+  - "How has our overall platform spending trended week over week over the past quarter?"
+  - "Which pipelines take the longest to complete and how often do they fail?"
+  - "What percentage of our compute usage is serverless versus traditional clusters?"
+  - "Which teams or users are running the most workloads and consuming the most resources?"
+  - "How much are we spending on AI and model serving products compared to standard compute?"
+  - "Which SQL warehouses are being used most heavily and are any consistently scaling up to their maximum size?"
+  - "What are the peak hours for compute resource usage and are there machines with consistently high CPU or memory pressure?"

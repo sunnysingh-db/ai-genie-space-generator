@@ -71,11 +71,10 @@ Open the notebook and run these cells in order:
 
 | Cell | What It Does |
 | --- | --- |
-| Cell 2 | Installs `langchain-databricks` |
-| Cell 3 | Restarts Python to pick up the package |
-| Cell 4 | Set your `table_list` — list of fully qualified table names |
-| Cell 5 | Runs auto-configure: scans tables, calls LLM, writes `config.yaml` |
-| Cell 6 | Runs the full framework: metric views + Genie Space |
+| Cell 2 | Installs `langchain-databricks` and restarts Python to pick up the package |
+| Cell 3 | Set your `table_list` — list of fully qualified table names and optionally catalog/schema for metric views |
+| Cell 4 | Runs auto-configure: scans tables, calls LLM, writes `config.yaml` |
+| Cell 5 | Runs the full framework: metric views + Genie Space |
 
 ### Example `table_list`
 
@@ -87,7 +86,7 @@ table_list = [
 ]
 ```
 
-After Cell 5, review `config.yaml` and tweak if needed. Then run Cell 6.
+After Cell 4, review `config.yaml` and tweak if needed. Then run Cell 5.
 
 ## What Gets Created
 
