@@ -35,12 +35,16 @@ class AutoConfigurator:
 
     def __init__(self, table_list: List[str], config_path: str,
                  llm_model: str = None, model_pool: list = None,
-                 sample_rows: int = 5, max_workers: int = 10):
+                 sample_rows: int = 5, max_workers: int = 10,
+                 metric_views_catalog: str = None, 
+                 metric_views_schema: str = None):
         self.table_list = table_list
         self.config_path = self._resolve_path(config_path)
         self.sample_rows = sample_rows
         self.max_workers = max_workers
         self.spark = SparkSession.builder.getOrCreate()
+        self.metric_views_catalog = metric_views_catalog
+        self.metric_views_schema = metric_views_schema
 
         # Parse table list into components
         self.parsed_tables = []
@@ -430,8 +434,8 @@ RULES:
         # Write table_list instead of catalog/schema
         updated['table_list'] = self.table_list
         # Derive catalog/schema from first table for metric view target
-        updated['catalog'] = self.primary_catalog
-        updated['schema'] = self.primary_schema
+        updated['catalog'] = self.metric_views_catalog or self.primary_catalog
+        updated['schema'] = self.metric_views_schema or self.primary_schema
         updated['llm_model'] = self.existing_llm
 
         for field in self.VALUE_FIELDS:
@@ -455,8 +459,8 @@ RULES:
         lines += [
             "",
             "# ── Derived Target Schema (for metric view creation) ──────────────",
-            f"catalog: {self.primary_catalog}",
-            f"schema: {self.primary_schema}",
+            f"catalog: {self.metric_views_catalog or self.primary_catalog}",
+            f"schema: {self.metric_views_schema or self.primary_schema}",
             "",
             "# ── Genie Space ────────────────────────────────────────────────────────",
             f'genie_space_name: "{updated.get("genie_space_name", "Analytics Space")}"',
@@ -613,7 +617,9 @@ RULES:
 
 def auto_configure(table_list: list, config_path: str,
                    llm_model: str = None, model_pool: list = None,
-                   sample_rows: int = 5, max_workers: int = 10) -> Dict[str, Any]:
+                   sample_rows: int = 5, max_workers: int = 10,
+                   metric_views_catalog: str = None, 
+                   metric_views_schema: str = None) -> Dict[str, Any]:
     """
     Analyse specified tables and auto-update config.yaml values.
     
@@ -624,6 +630,8 @@ def auto_configure(table_list: list, config_path: str,
     configurator = AutoConfigurator(
         table_list=table_list, config_path=config_path,
         llm_model=llm_model, model_pool=model_pool,
-        sample_rows=sample_rows, max_workers=max_workers
+        sample_rows=sample_rows, max_workers=max_workers,
+        metric_views_catalog = metric_views_catalog,
+        metric_views_schema = metric_views_schema
     )
     return configurator.run()
