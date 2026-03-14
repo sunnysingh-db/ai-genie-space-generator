@@ -6,26 +6,18 @@
 
 # ── Table List (fully qualified: catalog.schema.table) ──────────────
 table_list:
-  - "system.billing.list_prices"
-  - "system.billing.usage"
-  - "system.lakeflow.job_run_timeline"
-  - "system.lakeflow.job_task_run_timeline"
-  - "system.lakeflow.job_tasks"
-  - "system.lakeflow.jobs"
-  - "system.lakeflow.pipeline_update_timeline"
-  - "system.lakeflow.pipelines"
-  - "system.compute.clusters"
-  - "system.compute.node_timeline"
-  - "system.compute.node_types"
-  - "system.compute.warehouse_events"
-  - "system.compute.warehouses"
+  - "sunny_uc.demo.airlines"
+  - "sunny_uc.demo.airports"
+  - "sunny_uc.demo.bookings"
+  - "sunny_uc.demo.flights"
+  - "sunny_uc.demo.passengers"
 
 # ── Derived Target Schema (for metric view creation) ──────────────
-catalog: system
-schema: billing
+catalog: sunny_uc
+schema: demo
 
 # ── Genie Space ────────────────────────────────────────────────────────
-genie_space_name: "Databricks Platform Cost & Operations"
+genie_space_name: "Airline Operations & Booking Analytics"
 
 # ── AI Model ───────────────────────────────────────────────────────────
 # Options: databricks-claude-opus-4-6, databricks-meta-llama-3-1-405b-instruct
@@ -36,28 +28,28 @@ llm_model: databricks-claude-sonnet-4-6
 # ============================================================
 
 # Q1: What does your business do?
-business_domain: "Databricks platform operations covering cloud compute spending, automated job scheduling, data pipeline execution, and SQL analytics warehouse usage across multiple workspaces."
+business_domain: "International airline group managing flight operations, passenger bookings, and loyalty programs across 15+ carriers serving 20 major airports worldwide spanning multiple global regions and alliances."
 
 # Q2: What data is tracked in these tables?
-data_description: "Cloud resource consumption and costs by product type, job and pipeline run history with success and failure outcomes, compute cluster configurations and real-time hardware utilisation, SQL warehouse activity and scaling events, and official list pricing for all platform SKUs."
+data_description: "Flight schedules with delay and occupancy tracking, passenger bookings with fare breakdowns and cabin class details, traveller profiles with frequent flyer tiers and lifetime miles, airline fleet and alliance information, and airport infrastructure data across global regions."
 
 # Q3: Who uses this data and what decisions do they make?
-stakeholders_and_decisions: "Finance teams track spending by product and workspace; platform engineers monitor job failures and pipeline health; operations managers review compute efficiency and warehouse scaling; IT governance oversees resource ownership and tagging compliance."
+stakeholders_and_decisions: "Revenue managers analyse fare trends and cabin class mix; operations teams monitor delays, cancellations, and occupancy rates; loyalty program managers track frequent flyer tiers and miles; route planners evaluate airport and airline performance across regions."
 
 # Q4: Any other important context? (optional)
-additional_context: "Billing data runs from 2013 to present; job and pipeline runs cover late 2025 to March 2026; warehouse events from September 2025. Costs link to compute clusters, jobs, and warehouses. Job runs connect to individual task outcomes. Pipeline updates tie back to triggering jobs."
+additional_context: "Flights span September 2025 to February 2026; bookings from July 2025 to February 2026. Cabin classes include Economy, Premium Economy, Business, and First. Alliances are Oneworld, SkyTeam, and Star Alliance. Bookings link to passengers and flights; flights link to airlines and airports."
 
 # ============================================================
 # Sample Questions (auto-generated)
 # ============================================================
 sample_questions:
-  - "Which workspaces are spending the most on cloud compute, and how has that changed over the past three months?"
-  - "What percentage of automated jobs failed or were cancelled last week, and which jobs had the highest failure rate?"
-  - "Which product types — such as all-purpose compute, jobs, or SQL warehouses — are driving the most consumption costs?"
-  - "How long are our data pipelines taking to complete on average, and are any consistently running longer than expected?"
-  - "Which SQL warehouses are scaling up most frequently, and are any being left running without activity?"
-  - "Who are the top ten users or teams consuming the most compute resources this month?"
-  - "How does our spending this month compare to the same period last month, broken down by product category?"
-  - "Which clusters are showing high CPU or memory usage, and are they linked to specific jobs or teams?"
-  - "Are there any jobs that regularly queue for a long time before starting, suggesting a compute bottleneck?"
-  - "What is the estimated cost of our serverless versus standard compute usage over the last 30 days?"
+  - "What is the total revenue from bookings broken down by cabin class?"
+  - "Which airlines have the highest average flight delay in minutes?"
+  - "How does the occupancy rate trend month over month across all flights?"
+  - "What are the top five routes by total number of passengers?"
+  - "Which booking channels generate the most revenue?"
+  - "How do cancellation rates compare across airlines and alliances?"
+  - "What is the average fare difference between Economy and Business class by region?"
+  - "Which frequent flyer tier contributes the most total booking revenue?"
+  - "What percentage of bookings include checked bags or purchased Wi-Fi?"
+  - "Which airports experience the highest rate of delayed departures?"

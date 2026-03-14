@@ -170,4 +170,4 @@ ai-genie-space-generator/
 
 ---
 
-**Author:** Sunny Singh — sunny.singh@databricks.com | [LinkedIn](https://www.linkedin.com/in/sunny-singh-databricks/)
+**Author:** Built using [Genie Code](https://docs.databricks.com/aws/en/genie-code/) by Sunny Singh — sunny.singh@databricks.com | [LinkedIn](https://www.linkedin.com/in/sunny-singh-databricks/)
