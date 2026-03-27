@@ -15,6 +15,8 @@ import json
 import re
 import time
 
+import re as _re
+
 class LLMOrchestrator:
     """Orchestrates multi-step LLM-powered generation of metric views and Genie configurations."""
     
@@ -151,22 +153,27 @@ class LLMOrchestrator:
             # ================================================================
             # Phase 3: Sample questions + Business instructions (parallel)
             # ================================================================
-            print("Steps 5 & 6: Generating questions and instructions in parallel...")
+            print("Steps 5-7: Generating questions, instructions & SQL snippets in parallel...")
             t_phase3 = time.time()
             questions = None
             business_instructions = None
+            filters_expressions = None
             
-            with ThreadPoolExecutor(max_workers=2) as executor:
+            with ThreadPoolExecutor(max_workers=3) as executor:
                 future_questions = executor.submit(
                     self.generate_sample_questions, dimensions, measures, semantics['joins']
                 )
                 future_instructions = executor.submit(
                     self.generate_business_instructions, dimensions, measures
                 )
+                future_snippets = executor.submit(
+                    self.generate_filters_and_expressions, dimensions, measures
+                )
                 
                 futures_map = {
                     future_questions: 'questions',
-                    future_instructions: 'instructions'
+                    future_instructions: 'instructions',
+                    future_snippets: 'snippets'
                 }
                 
                 for future in as_completed(futures_map.keys()):
@@ -180,6 +187,15 @@ class LLMOrchestrator:
                         business_instructions = future.result()
                         step_timings['instructions'] = elapsed
                         print(f"  \u2705 Generated business instructions ({len(business_instructions)} chars, {elapsed:.1f}s)")
+                    elif step_name == 'snippets':
+                        filters_expressions = future.result()
+                        step_timings['snippets'] = elapsed
+
+            # Phase 3b: Generate benchmarks (needs sample_questions from above)
+            print("Step 7/7: Generating benchmarks...")
+            t_bench = time.time()
+            benchmarks = self.generate_benchmarks(questions, dimensions, measures)
+            step_timings['benchmarks'] = time.time() - t_bench
             
             phase3_time = time.time() - t_phase3
             print(f"  \u23f1\ufe0f  Phase 3 total (wall clock): {phase3_time:.1f}s\n")
@@ -194,6 +210,10 @@ class LLMOrchestrator:
                     merged_questions.append(q)
                     seen.add(q_text)
             
+            # Extract filters and expressions
+            gen_filters = (filters_expressions or {}).get('filters', [])
+            gen_expressions = (filters_expressions or {}).get('expressions', [])
+
             result = {
                 'relevant_tables': relevant_tables,
                 'dimensions': dimensions,
@@ -202,7 +222,10 @@ class LLMOrchestrator:
                 'table_descriptions': semantics['table_descriptions'],
                 'column_descriptions': semantics['column_descriptions'],
                 'sample_questions': merged_questions,
-                'business_instructions': business_instructions
+                'business_instructions': business_instructions,
+                'filters': gen_filters,
+                'expressions': gen_expressions,
+                'benchmarks': benchmarks if benchmarks else [],
             }
             
             print("="*80)
@@ -213,6 +236,9 @@ class LLMOrchestrator:
             print(f"  \u2022 Measures: {len(measures)}")
             print(f"  \u2022 Joins: {len(semantics['joins'])}")
             print(f"  \u2022 Sample Questions: {len(merged_questions)} ({len(self.sample_questions)} from config + {len(questions)} LLM-generated)")
+            print(f"  \u2022 Filters: {len(gen_filters)}")
+            print(f"  \u2022 Expressions: {len(gen_expressions)}")
+            print(f"  \u2022 Benchmarks: {len(benchmarks)}")
             print(f"  \u2022 Business Instructions: Generated")
             print()
             print("  \u23f1\ufe0f  Step Timings:")
@@ -384,9 +410,18 @@ Example start: [{{"name": "order_date", "column": "order_date", "table": "orders
                     dim_cols.append(f"{col['table_name']}.{col['column_name']}")
             dimensions_str = ", ".join(dim_cols[:10])
         
+        # Build valid column lookup for validation
+        valid_columns = {}
+        for col in metadata['columns']:
+            tname = col['table_name']
+            if tname not in valid_columns:
+                valid_columns[tname] = set()
+            valid_columns[tname].add(col['column_name'].lower())
+
         shared_context = {
             "numeric_cols_by_table": numeric_cols_by_table,
-            "dimensions_str": dimensions_str
+            "dimensions_str": dimensions_str,
+            "valid_columns": valid_columns
         }
         
         import time as _time
@@ -425,6 +460,42 @@ Example start: [{{"name": "order_date", "column": "order_date", "table": "orders
         
         total_time = _time.time() - t0
         print(f"     Parallel measures total: {len(unique_measures)} unique ({total_time:.1f}s wall clock)")
+        
+        # Validate measures against actual columns
+        valid_columns = shared_context.get('valid_columns', {})
+        if valid_columns:
+            validated = []
+            removed_cols = set()
+            for m in unique_measures:
+                sql = m.get('sql', '')
+                table = m.get('table', '')
+                if table and table in valid_columns:
+                    # Check if any column reference in SQL is invalid
+                    table_cols = valid_columns[table]
+                    invalid = False
+                    for token in _re.findall(r'\b([a-z_][a-z0-9_]*)\b', sql.lower()):
+                        # Skip SQL keywords and aggregation functions
+                        if token in _SQL_KEYWORDS:
+                            continue
+                        # If it looks like a column ref and doesn't exist
+                        if token not in table_cols and token not in ('1', '0', 'null', 'true', 'false'):
+                            # Could be a column from a joined table - skip validation for those
+                            all_cols = set()
+                            for cols in valid_columns.values():
+                                all_cols.update(cols)
+                            if token not in all_cols:
+                                invalid = True
+                                removed_cols.add(token)
+                                break
+                    if not invalid:
+                        validated.append(m)
+                else:
+                    validated.append(m)
+            
+            if len(validated) < len(unique_measures):
+                removed_count = len(unique_measures) - len(validated)
+                print(f"     ⚠️  Removed {removed_count} measures referencing invalid columns: {', '.join(sorted(removed_cols))}")
+                unique_measures = validated
         
         if len(unique_measures) < 20:
             print(f"\u26a0\ufe0f  Warning: Only {len(unique_measures)} measures generated, target was 20+")
@@ -469,7 +540,8 @@ For each measure provide:
   "formula": "SQL aggregation using table.column format",
   "type": "simple",
   "description": "What this metric measures in business terms",
-  "synonyms": ["synonym1", "synonym2", "synonym3"]
+  "synonyms": ["synonym1", "synonym2", "synonym3"],
+  "instruction": "When to use this measure (1 sentence)"
 }}}}
 
 CRITICAL: Your response must be ONLY a JSON array. No explanations, no markdown.
@@ -504,7 +576,8 @@ For each measure provide:
   "formula": "SQL aggregation using table.column format",
   "type": "derived",
   "description": "What this metric measures in business terms",
-  "synonyms": ["synonym1", "synonym2", "synonym3"]
+  "synonyms": ["synonym1", "synonym2", "synonym3"],
+  "instruction": "When to use this measure (1 sentence)"
 }}}}
 
 CRITICAL: Your response must be ONLY a JSON array. No explanations, no markdown.
@@ -543,7 +616,8 @@ For each measure provide:
   "formula": "SQL aggregation using table.column format",
   "type": "derived",
   "description": "What this metric measures in business terms",
-  "synonyms": ["synonym1", "synonym2", "synonym3"]
+  "synonyms": ["synonym1", "synonym2", "synonym3"],
+  "instruction": "When to use this measure (1 sentence)"
 }}}}
 
 CRITICAL: Your response must be ONLY a JSON array. No explanations, no markdown.
@@ -690,7 +764,10 @@ Format:
     "right_table": "table2", 
     "join_type": "INNER|LEFT|RIGHT",
     "condition": "table1.column = table2.column",
-    "relationship_type": "MANY_TO_ONE|ONE_TO_MANY|ONE_TO_ONE"
+    "relationship_type": "MANY_TO_ONE|ONE_TO_MANY|ONE_TO_ONE",
+    "display_name": "Short descriptive name for this join (e.g., 'Bookings to Passengers')",
+    "comment": "Brief explanation of the business relationship (e.g., 'Links each booking to the passenger who made it')",
+    "instruction": "When and how to use this join in queries (e.g., 'Use this join when analyzing passenger demographics for bookings. Always join via passenger_id.')"
   }}
 ]
 
@@ -915,7 +992,186 @@ CRITICAL: Return plain text only in structured bullets. No JSON, no code blocks,
             # Fallback: Generate simple template-based instructions
             return self._generate_fallback_instructions(dimensions, measures)
     
-    # ========================================================================
+    def generate_filters_and_expressions(self, dimensions: list, measures: list) -> dict:
+        """
+        Generate reusable SQL filters and expressions for the Genie Space.
+        
+        Returns:
+            dict with 'filters' and 'expressions' lists
+        """
+        dims_summary = ", ".join(d['name'] for d in dimensions[:15])
+        measures_summary = ", ".join(m['name'] for m in measures[:15])
+        
+        # Collect categorical dimension samples for filter generation
+        cat_dims_info = []
+        for d in dimensions:
+            if d.get('type') == 'categorical' and d.get('synonyms'):
+                cat_dims_info.append(f"{d['table']}.{d['column']}: e.g. {', '.join(d['synonyms'][:3])}")
+        cat_info = "\n".join(cat_dims_info[:10]) if cat_dims_info else "No categorical dimensions available"
+        
+        # Collect temporal dimensions for expression generation
+        temporal_dims_info = []
+        for d in dimensions:
+            if d.get('type') == 'temporal':
+                temporal_dims_info.append(f"{d['table']}.{d['column']} ({d.get('description', 'date/time')})")
+        temporal_info = "\n".join(temporal_dims_info[:10]) if temporal_dims_info else "No temporal dimensions available"
+        
+        prompt = f"""You are a data analyst creating reusable SQL snippets for a BI tool.
+
+BUSINESS CONTEXT:
+{self.business_context}
+
+AVAILABLE DIMENSIONS: {dims_summary}
+AVAILABLE MEASURES: {measures_summary}
+
+CATEGORICAL COLUMNS (for filters):
+{cat_info}
+
+TEMPORAL COLUMNS (for expressions):
+{temporal_info}
+
+TASK:
+Generate a JSON object with two arrays: "filters" and "expressions".
+
+FILTERS (generate 5-8): Common business filters that users frequently apply.
+Each filter:
+{{
+  "sql": "table.column = 'value'",
+  "display_name": "human-readable name",
+  "synonyms": ["alt1", "alt2"],
+  "comment": "What this filter does",
+  "instruction": "When to apply this filter"
+}}
+
+EXPRESSIONS (generate 5-10): Reusable SQL expressions for derived columns.
+Each expression:
+{{
+  "alias": "expression_name",
+  "sql": "SQL expression like YEAR(table.date_col) or CASE WHEN ... END",
+  "display_name": "human-readable name",
+  "synonyms": ["alt1", "alt2"],
+  "comment": "What this expression computes",
+  "instruction": "When to use this expression"
+}}
+
+Focus on:
+- Filters: status checks, time ranges, category filters, threshold filters
+- Expressions: date extractions (year, month, quarter), categorizations, bucketing
+
+CRITICAL: Return ONLY a JSON object with "filters" and "expressions" arrays. No markdown.
+ALWAYS use table_name.column_name format in SQL.
+Start with {{ and end with }}.
+"""
+        
+        try:
+            response = self.llm.invoke(prompt)
+            result = self._parse_json_response(response.content, expected_type=dict)
+            filters = result.get('filters', [])
+            expressions = result.get('expressions', [])
+            print(f"  \u2705 Generated {len(filters)} filters + {len(expressions)} expressions")
+            return {'filters': filters, 'expressions': expressions}
+        except Exception as e:
+            print(f"  \u26a0\ufe0f Filters/expressions generation failed: {str(e)[:100]}")
+            return {'filters': [], 'expressions': []}
+
+    def generate_benchmarks(self, sample_questions: list, dimensions: list,
+                           measures: list) -> list:
+        """
+        Generate benchmark questions with ground-truth SQL for accuracy evaluation.
+        
+        Per Genie API spec, each benchmark question has:
+          - id: 32-char hex
+          - question: [str]
+          - answers: [{format: "SQL", body: [sql_str]}]
+        
+        Generates alternate phrasings of the best sample questions + new benchmark questions.
+        """
+        import uuid as _uuid
+        
+        # Pick the best questions that have SQL
+        sql_questions = [q for q in sample_questions if isinstance(q, dict) and q.get('sql')][:8]
+        
+        if not sql_questions:
+            print("  \u26a0\ufe0f No SQL questions available for benchmark generation")
+            return []
+        
+        q_block = "\n".join(
+            f"  Q: {q['question']}\n  SQL: {q['sql']}"
+            for q in sql_questions
+        )
+        
+        dims_str = ", ".join(d['name'] for d in dimensions[:10])
+        meas_str = ", ".join(m['name'] for m in measures[:10])
+        
+        prompt = f"""You are a QA engineer creating benchmark test questions for a BI analytics tool.
+
+BUSINESS CONTEXT:
+{self.business_context}
+
+EXISTING QUESTIONS WITH SQL:
+{q_block}
+
+AVAILABLE DIMENSIONS: {dims_str}
+AVAILABLE MEASURES: {meas_str}
+
+TASK:
+Generate 10-15 benchmark questions. For each:
+1. Take an existing question and rephrase it differently (2-3 per original)
+2. Add 3-5 completely new questions covering untested areas
+
+Each benchmark must have a question AND a correct SQL answer.
+
+Return a JSON array where each item has:
+{{
+  "question": "Natural language question (business language, no column names)",
+  "sql": "Complete SQL query that answers this question correctly"
+}}
+
+RULES:
+- Questions must be in plain business language — no column names or technical terms
+- SQL must be complete and valid
+- Include 2-4 alternate phrasings of existing questions (same SQL, different wording)
+- Include 3-5 new questions not covered by the existing set
+- Keep SQL queries concise (under 200 chars)
+- ALWAYS use table_name.column_name format in SQL
+
+Return ONLY a JSON array. No markdown, no explanation.
+Start with [ and end with ].
+"""
+        
+        try:
+            response = self.llm.invoke(prompt)
+            raw_benchmarks = self._parse_json_response(response.content, expected_type=list)
+            
+            # Convert to Genie API benchmark format
+            benchmarks = []
+            for b in raw_benchmarks:
+                q_text = b.get('question', '')
+                b_sql = b.get('sql', '')
+                if not q_text:
+                    continue
+                
+                benchmark = {
+                    "id": _uuid.uuid4().hex,
+                    "question": [q_text],
+                }
+                if b_sql:
+                    benchmark["answer"] = [{
+                        "format": "SQL",
+                        "content": [b_sql]
+                    }]
+                benchmarks.append(benchmark)
+            
+            # Sort by id (required by API)
+            benchmarks.sort(key=lambda x: x['id'])
+            print(f"  \u2705 Generated {len(benchmarks)} benchmark questions")
+            return benchmarks
+            
+        except Exception as e:
+            print(f"  \u26a0\ufe0f Benchmark generation failed: {str(e)[:100]}")
+            return []
+
+        # ========================================================================
     # Helper Methods
     # ========================================================================
     

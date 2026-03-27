@@ -1,9 +1,10 @@
 """
-Main Orchestrator Module
+Main Orchestrator Module (Enhanced with Deep Scan Integration)
 Ties together all framework components. Supports both:
   - table_list mode (explicit FQ table names, cross-schema)
   - legacy catalog+schema mode (scan full schema)
 All configuration flows from config.yaml.
+Passes deep scan data (column_profiles, dimensions, data_model) downstream.
 """
 
 from pyspark.sql import SparkSession
@@ -46,6 +47,14 @@ class GenieSpaceFramework:
         self.table_fq_map = self.config_handler.get_table_name_map()
         self.use_table_list = bool(self.table_list)
 
+        # Deep scan data (from auto_configurator)
+        self.column_profiles = self.config_handler.get('column_profiles', {})
+        self.config_dimensions = self.config_handler.get('dimensions', [])
+        self.config_data_model = {
+            'entity_types': self.config_handler.get('entity_types', {}),
+            'relationships': self.config_handler.get('relationships', []),
+        }
+
         print("=" * 80)
         print("\U0001f680 AI-POWERED GENIE SPACE GENERATOR FRAMEWORK")
         print("=" * 80)
@@ -66,6 +75,14 @@ class GenieSpaceFramework:
         print(f"Genie Space: {self.genie_space_name}")
         print(f"Warehouse: {self.warehouse_id or 'auto-detect'}")
         print(f"Sample Questions: {len(self.sample_questions)} from config")
+
+        # Deep scan summary
+        if self.column_profiles:
+            n_profiles = sum(len(v) for v in self.column_profiles.values())
+            print(f"Deep Scan: {n_profiles} column profiles, "
+                  f"{len(self.config_dimensions)} dimensions, "
+                  f"{len(self.config_data_model.get('relationships', []))} relationships")
+
         print(f"Business Context: {self.business_context[:100]}...")
         print("=" * 80)
 
@@ -107,7 +124,7 @@ class GenieSpaceFramework:
                 llm_model=self.llm_model,
                 model_pool=self.model_pool,
                 sample_questions=self.sample_questions,
-                skip_table_filtering=self.use_table_list  # Skip LLM filtering when table_list provided
+                skip_table_filtering=self.use_table_list
             )
             llm_config = llm_orchestrator.generate_metrics_config(metadata)
             result['llm_config'] = llm_config
@@ -142,15 +159,13 @@ class GenieSpaceFramework:
             total_items = n_relevant + n_mv
             if total_items > GENIE_SPACE_MAX:
                 if n_mv >= GENIE_SPACE_MAX:
-                    print(f"\n\u26a0\ufe0f  {n_mv} metric views alone exceed Genie Space limit of {GENIE_SPACE_MAX}. "
-                          f"Top {GENIE_SPACE_MAX} metric views will be selected by measure richness (0 raw tables).")
+                    print(f"\n\u26a0\ufe0f  {n_mv} metric views alone exceed limit of {GENIE_SPACE_MAX}.")
                 else:
                     remaining = GENIE_SPACE_MAX - n_mv
-                    print(f"\n\u26a0\ufe0f  Total items ({n_relevant} tables + {n_mv} metric views = {total_items}) "
-                          f"exceeds Genie Space limit of {GENIE_SPACE_MAX}. "
-                          f"All {n_mv} metric views will be kept; {remaining} table slots available for raw tables.")
+                    print(f"\n\u26a0\ufe0f  Total items ({total_items}) exceed limit of {GENIE_SPACE_MAX}. "
+                          f"{remaining} table slots available.")
 
-            # Step 4: Create Genie Space
+            # Step 4: Create Genie Space (with deep scan data)
             print("\n" + "=" * 80)
             print("STEP 4: CREATING GENIE SPACE")
             print("=" * 80)
@@ -163,7 +178,8 @@ class GenieSpaceFramework:
                 metric_views=metric_views_result.get('views', []),
                 business_context=self.business_context,
                 genie_space_name=self.genie_space_name,
-                genie_description=self.genie_description
+                genie_description=self.genie_description,
+                column_profiles=self.column_profiles,
             )
             result['genie_space'] = genie_space
 
