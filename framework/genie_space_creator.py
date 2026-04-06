@@ -416,12 +416,21 @@ class GenieSpaceCreator:
 
         # --- Measures with comment + instruction ---
         measures = []
+        seen_display_names = set()
         for metric in config.get('measures', []):
+            display_name = metric.get('display_name', metric['name'])
+            # Deduplicate by display_name (case-insensitive)
+            if display_name.lower() in seen_display_names:
+                continue
+            seen_display_names.add(display_name.lower())
+            # Backtick-quote column references with spaces in formula SQL
+            formula = metric.get('formula', '')
+            formula = self._backtick_quote_sql(formula)
             measure = {
                 "id": gen_uuid(),
                 "alias": metric['name'],
-                "sql": [metric.get('formula', '')],
-                "display_name": metric.get('display_name', metric['name'])
+                "sql": [formula],
+                "display_name": display_name
             }
             if metric.get('synonyms'):
                 measure['synonyms'] = metric['synonyms'][:5]
@@ -573,13 +582,49 @@ class GenieSpaceCreator:
         return join_specs
 
     def _backtick_quote_condition(self, condition: str) -> str:
-        """Convert a join condition to use backtick-quoted identifiers."""
-        def quote_identifier(match):
+        """
+        Convert a join condition to use backtick-quoted identifiers.
+
+        Handles both simple identifiers (table.column) and identifiers with
+        spaces (table.[Column Name] or table.Column Name With Spaces).
+
+        Output always uses backtick notation: `table`.`column`
+        """
+        # First, convert any bracket notation [Column Name] to backtick notation
+        condition = re.sub(
+            r'(\w+)\.\[([^\]]+)\]',
+            r'`\1`.`\2`',
+            condition
+        )
+
+        # Then handle simple dot-separated identifiers (no spaces in names)
+        def quote_simple_identifier(match):
             parts = match.group(0).split('.')
             return '.'.join(f'`{p.strip("`")}`' for p in parts)
 
-        result = re.sub(r'\b([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)+)\b', quote_identifier, condition)
-        return result
+        condition = re.sub(r'\b([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)+)\b', quote_simple_identifier, condition)
+        return condition
+
+    @staticmethod
+    def _backtick_quote_sql(sql: str) -> str:
+        """
+        Add backtick quoting to column references with spaces in SQL expressions.
+
+        Converts: table.Column Name With Spaces  →  `table`.`Column Name With Spaces`
+        Preserves already-quoted references.
+        """
+        # Match table_alias.UnquotedColumnWithSpaces (where column starts with uppercase
+        # and contains spaces, ending before SQL keywords/operators)
+        pattern = r'(\b\w+)\.([A-Za-z][A-Za-z0-9_ ]+?)(?=\s*(?:[)<>,=!*+\-/]|$|\bIS\b|\bELSE\b|\bTHEN\b|\bWHEN\b|\bAND\b|\bOR\b|\bEND\b|\bIN\b|\bAS\b|\bNOT\b|\bLIKE\b|\bILIKE\b|\bWITHIN\b|\bBETWEEN\b))'
+
+        def replacer(m):
+            alias = m.group(1)
+            col = m.group(2).rstrip()
+            if ' ' in col:
+                return f'`{alias}`.`{col}`'
+            return m.group(0)
+
+        return re.sub(pattern, replacer, sql)
 
     def _build_instructions_text(self, config: Dict[str, Any], business_context: str) -> str:
         """Use LLM-generated business instructions, with fallback."""
