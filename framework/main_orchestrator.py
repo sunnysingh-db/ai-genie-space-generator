@@ -124,7 +124,8 @@ class GenieSpaceFramework:
                 llm_model=self.llm_model,
                 model_pool=self.model_pool,
                 sample_questions=self.sample_questions,
-                skip_table_filtering=self.use_table_list
+                skip_table_filtering=self.use_table_list,
+                table_fq_map=self.table_fq_map
             )
             llm_config = llm_orchestrator.generate_metrics_config(metadata)
             result['llm_config'] = llm_config

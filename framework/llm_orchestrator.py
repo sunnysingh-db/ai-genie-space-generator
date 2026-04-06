@@ -29,21 +29,23 @@ class LLMOrchestrator:
 
     def __init__(self, business_context: str, llm_model: str = "databricks-claude-opus-4-6",
                  model_pool: list = None, sample_questions: list = None,
-                 skip_table_filtering: bool = False):
+                 skip_table_filtering: bool = False, table_fq_map: dict = None):
         """
         Initialize LLM orchestrator with resilient multi-model support.
-        
+
         Args:
             business_context: Business context describing what metrics matter
             llm_model: Primary Databricks Foundation Model endpoint (used as fallback if model_pool is empty)
             model_pool: List of model endpoints for load distribution and failover.
                         If not provided, defaults to DEFAULT_MODEL_POOL.
             sample_questions: User-provided sample questions from config (drives metric generation)
+            table_fq_map: Mapping of short table names to fully-qualified names (catalog.schema.table)
         """
         self.business_context = business_context
         self.llm_model = llm_model
         self.sample_questions = sample_questions or []
         self.skip_table_filtering = skip_table_filtering
+        self._table_fq_map = table_fq_map or {}
         
         # Build sample questions text for injection into LLM prompts
         if self.sample_questions:
@@ -116,6 +118,8 @@ class LLMOrchestrator:
             
             # Filter metadata to only relevant tables
             filtered_metadata = self._filter_metadata(metadata, relevant_tables)
+            # Store metadata for downstream use (e.g. sample question SQL generation)
+            self._metadata = filtered_metadata
             
             # ================================================================
             # Phase 2: Dimensions → Measures → Joins (sequential)
@@ -519,6 +523,19 @@ CRITICAL RULE — TABLE-PREFIXED COLUMNS:
 Every column reference in your formulas MUST use table_name.column_name format.
 Example: SUM(orders.total_amount) — NOT SUM(total_amount).
 This is mandatory because columns from different tables may share names.
+
+CRITICAL RULE — EXACT COLUMN NAMES:
+Use EXACT column names as shown above. Do NOT convert spaces to underscores or vice versa.
+If a column is named "Payment amount", use "Payment amount" — NOT "Payment_amount".
+Use the EXACT table names as listed above. Do NOT shorten or abbreviate them.
+
+CRITICAL RULE — DATABRICKS SQL SYNTAX:
+All formulas MUST use Databricks SQL syntax. Common pitfalls to avoid:
+- Use TIMESTAMPDIFF(HOUR, start_ts, end_ts) for time differences in hours — NOT DATEDIFF('hour', ...) or EXTRACT(EPOCH FROM ...) / 3600
+- Use DATEDIFF(end_date, start_date) only for day differences (returns integer days)
+- Use CURRENT_TIMESTAMP() not NOW()
+- PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY col) for medians
+- NEVER use PostgreSQL-specific syntax like EXTRACT(EPOCH FROM interval)
 """
     
     def _generate_measures_simple(self, shared_context: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -775,6 +792,8 @@ CRITICAL RULES:
 - Return ONLY a JSON array. No explanations. Start with [ and end with ].
 - ONLY use column names that actually exist in the Columns list for each table above.
 - NEVER invent or assume column names that are not listed. If no valid join column exists between two tables, do NOT create a join for them.
+- Use the EXACT table names as listed above for left_table and right_table. Do NOT shorten, abbreviate, or infer table names (e.g. use "sn_customerservice_tbs" not "sn_customerservice").
+- Column names in the condition must EXACTLY match the column names listed above — preserve spaces, casing, and special characters as-is.
 """
         
         response = self.llm.invoke(prompt)
@@ -861,25 +880,41 @@ Keep descriptions concise and business-focused.
     def generate_sample_questions(self, dimensions: List[Dict], measures: List[Dict], joins: List[Dict]) -> List[Dict[str, str]]:
         """
         Step 5: Generate SQL for config questions + additional questions.
-        
+
         Args:
             dimensions: Generated dimensions
             measures: Generated measures
             joins: Generated joins
-            
+
         Returns:
             List of sample questions with SQL and descriptions
         """
         dimensions_str = ", ".join([d['name'] for d in dimensions[:10]])
         measures_str = ", ".join([m['name'] for m in measures[:10]])
-        
+
+        # Build table→columns map for the prompt so LLM uses real table/column names
+        tables_with_columns = ""
+        if hasattr(self, '_metadata') and self._metadata:
+            # Build FQN lookup from table_fq_map if available
+            fq_map = getattr(self, '_table_fq_map', {})
+            cols_by_table = {}
+            for col in self._metadata.get('columns', []):
+                short_name = col['table_name']
+                fq = fq_map.get(short_name, short_name)
+                if fq not in cols_by_table:
+                    cols_by_table[fq] = []
+                cols_by_table[fq].append(col['column_name'])
+            tables_with_columns = "\nAVAILABLE TABLES AND COLUMNS (use ONLY these in SQL):\n"
+            for fq, cols in list(cols_by_table.items())[:15]:
+                tables_with_columns += f"  {fq}: {', '.join(cols[:20])}\n"
+
         # Include config questions so the LLM generates SQL for them
         config_questions_block = ""
         if self.sample_questions:
             config_questions_block = "\nUSER-PROVIDED QUESTIONS (generate SQL for these first):\n" + "\n".join(
                 f"  {i+1}. {q}" for i, q in enumerate(self.sample_questions)
             ) + "\n"
-        
+
         prompt = f"""You are a senior business analyst creating sample questions for a self-service BI tool used by non-technical business users.
 
 BUSINESS CONTEXT:
@@ -890,6 +925,7 @@ AVAILABLE DIMENSIONS:
 
 AVAILABLE MEASURES:
 {measures_str}
+{tables_with_columns}
 {config_questions_block}
 TASK:
 Generate sample questions with SQL. Include ALL user-provided questions above with SQL,
@@ -898,9 +934,16 @@ plus 5 additional questions. Each question must have a valid SQL query.
 For each question provide:
 {{
   "question": "Plain natural language question as a business user would ask aloud",
-  "sql": "Simple SQL query (keep under 150 characters)",
+  "sql": "Valid Databricks SQL query using fully-qualified table names",
   "description": "What business insight this provides, in plain language"
 }}
+
+CRITICAL RULES FOR SQL:
+- SQL MUST use the fully-qualified table names listed above (catalog.schema.table) — NEVER use shortened or invented names
+- SQL MUST use ONLY column names that exist in the table columns listed above — NEVER invent column names
+- Column names containing spaces MUST be backtick-quoted: `Column Name`
+- Use Databricks SQL syntax: TIMESTAMPDIFF(HOUR, start, end) for time diffs, CURRENT_DATE() for today
+- Keep SQL queries reasonably short but they MUST be syntactically valid and executable
 
 CRITICAL RULES FOR QUESTIONS:
 - Write the "question" in everyday BUSINESS LANGUAGE — as if a manager is asking a colleague
@@ -914,7 +957,6 @@ CRITICAL RULES FOR QUESTIONS:
 
 Your response must be ONLY a JSON array. No explanations, no markdown.
 Start with [ and end with ].
-Keep SQL queries SHORT and simple.
 """
         
         response = self.llm.invoke(prompt)
